@@ -1,4 +1,4 @@
-package udt
+package miniudt
 
 import (
 	"encoding/binary"
@@ -12,29 +12,40 @@ import (
 )
 
 const (
-	defExpTime    = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	defSynTime    = 10 * time.Millisecond
-	expCountClose = 16                                                         // close connection after this many EXPs
-	minTimeClose  = 15 * time.Second                                           // if at least this long has passed
-	sliceSize     = 1500 - 8 /*pppoe, similar*/ - 20 /*ipv4*/ - 8 /*udp*/ - 16 /*udt*/
+	defExpTime        = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
+	defSynTime        = 10 * time.Millisecond
+	expCountClose     = 16               // close connection after this many EXPs
+	minTimeClose      = 15 * time.Second // if at least this long has passed
+	handshakeInterval = time.Second
+
+	sliceOverhead = 8 /*pppoe, similar*/ - 20 /*ipv4*/ - 8 /*udp*/ - 16 /*udt*/
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
+var (
+	// The cookie cache improves connection setup time by remembering the SYN
+	// cookies sent by remote muxes.
+	cookieCache    = map[string]uint32{}
+	cookieCacheMut sync.Mutex
+)
+
 // Conn is a UDT connection carried over a Mux.
 type Conn struct {
 	mux *Mux
 	dst net.Addr
 
-	connID        uint32
-	remoteConnID  uint32
-	nextSeqNo     uint32
-	nextSeqNoMut  sync.Mutex
-	nextMsgNo     uint32
-	packetSize    int
-	interPktDelay time.Duration
+	connID       uint32
+	remoteConnID uint32
+	nextSeqNo    uint32
+	nextSeqNoMut sync.Mutex
+	nextMsgNo    uint32
+	packetSize   int
+
+	remoteCookie       uint32
+	remoteCookieUpdate chan uint32
 
 	inbuf     []byte
 	inbufMut  sync.Mutex
@@ -72,17 +83,14 @@ type Conn struct {
 }
 
 type connPacket struct {
+	src  uint32
 	dst  net.Addr
 	hdr  header
 	data []byte
 }
 
 func (p connPacket) String() string {
-	data := p.data
-	if len(data) > 16 {
-		data = data[:16]
-	}
-	return fmt.Sprintf("->%v %v % x", p.dst, p.hdr, data)
+	return fmt.Sprintf("%08x->%v %v %d", p.src, p.dst, p.hdr, len(p.data))
 }
 
 type connState int
@@ -95,16 +103,37 @@ const (
 	stateClosed
 )
 
-func newConn(m *Mux) *Conn {
+func (s connState) String() string {
+	switch s {
+	case stateInit:
+		return "Init"
+	case stateClientHandshake:
+		return "ClientHandshake"
+	case stateServerHandshake:
+		return "ServerHandshake"
+	case stateConnected:
+		return "Connected"
+	case stateClosed:
+		return "Closed"
+	default:
+		return "Unknown"
+	}
+}
+
+func newConn(m *Mux, dst net.Addr) *Conn {
 	conn := &Conn{
 		mux:        m,
-		connID:     uint32(rand.Int31()),
+		dst:        dst,
 		nextSeqNo:  uint32(rand.Int31()),
 		packetSize: 1500,
 		maxUnacked: 16,
-		in:         make(chan connPacket),
+		in:         make(chan connPacket, 16),
 		closed:     make(chan struct{}),
 	}
+
+	cookieCacheMut.Lock()
+	conn.remoteCookie = cookieCache[dst.String()]
+	cookieCacheMut.Unlock()
 
 	conn.unackedCond = sync.NewCond(&conn.unackedMut)
 	conn.stateCond = sync.NewCond(&conn.stateMut)
@@ -113,10 +142,10 @@ func newConn(m *Mux) *Conn {
 	conn.exp = time.NewTimer(defExpTime)
 	conn.syn = time.NewTimer(defSynTime)
 
+	conn.remoteCookieUpdate = make(chan uint32)
 	conn.debugResetRecvSeqNo = make(chan uint32)
 	conn.expReset = time.Now()
 
-	m.conns[conn.connID] = conn
 	go conn.reader()
 	return conn
 }
@@ -145,9 +174,8 @@ func (c *Conn) getState() connState {
 
 // handshake performs the client side handshake (i.e. Dial)
 func (c *Conn) handshake(timeout time.Duration) error {
-	t0 := time.NewTimer(0)
-	nextWait := time.Second
-	tz := time.NewTimer(timeout)
+	nextHandshake := time.NewTimer(0)
+	handshakeTimeout := time.NewTimer(timeout)
 
 	// Feed state changes into the states channel. Make sure to exit when the
 	// handshake is complete or aborted.
@@ -167,39 +195,48 @@ func (c *Conn) handshake(timeout time.Duration) error {
 		}
 	}()
 
+	// Wait for timers or state changes.
+
 	for {
 		select {
 		case <-c.closed:
+			// Failure. The connection has been closed during handshake for
+			// whatever reason.
 			return ErrClosed
 
 		case state := <-states:
 			switch state {
 			case stateConnected:
+				// Success. The reader changed state to connected.
 				return nil
 			case stateClosed:
+				// Failure. The connection has been closed during handshake
+				// for whatever reason.
 				return ErrClosed
 			default:
-				panic(fmt.Sprintf("bug: weird state transition: %d", state))
+				panic(fmt.Sprintf("bug: weird state transition: %v", state))
 			}
 
-		case <-tz.C:
+		case <-handshakeTimeout.C:
+			// Handshake timeout. Close and abort.
 			c.Close()
 			return ErrHandshakeTimeout
 
-		case <-t0.C:
+		case cookie := <-c.remoteCookieUpdate:
+			// We received a cookie challenge from the server side. Update our
+			// cookie and immediately schedule a new handshake request.
+			c.remoteCookie = cookie
+			nextHandshake.Reset(0)
+
+		case <-nextHandshake.C:
+			// Send a handshake request.
+
 			data := make([]byte, (8*32+128)/8)
-			binary.BigEndian.PutUint32(data[0:], 4) // UDT version
-			binary.BigEndian.PutUint32(data[4:], 0)
 			c.nextSeqNoMut.Lock()
-			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo) // Initial Sequence Number
+			handshakeData(data, c.nextSeqNo, uint32(c.packetSize), c.connID, c.remoteCookie, connectionTypeRequest)
 			c.nextSeqNoMut.Unlock()
-			binary.BigEndian.PutUint32(data[12:], uint32(c.packetSize)) // Packet Size
-			binary.BigEndian.PutUint32(data[16:], 0)                    // Flow Window
-			binary.BigEndian.PutUint32(data[20:], 0)                    // Connection Type (TODO)
-			binary.BigEndian.PutUint32(data[24:], c.connID)             // Client Conn ID
-			binary.BigEndian.PutUint32(data[28:], 0)                    // Cookie (TODO)
-			binary.BigEndian.PutUint32(data[32:], 0)                    // Peer IP Address (TODO)
 			c.mux.out <- connPacket{
+				src: c.connID,
 				dst: c.dst,
 				hdr: &controlHeader{
 					packetType: typeHandshake,
@@ -208,7 +245,7 @@ func (c *Conn) handshake(timeout time.Duration) error {
 				},
 				data: data,
 			}
-			t0.Reset(nextWait)
+			nextHandshake.Reset(handshakeInterval)
 		}
 	}
 }
@@ -222,6 +259,19 @@ func (c *Conn) reader() {
 	for {
 		select {
 		case <-c.closed:
+			// Ack any received but not yet acked messages.
+			if c.rcvdUnacked > 0 {
+				c.sendACK()
+			}
+			// Send a shutdown message.
+			c.mux.out <- connPacket{
+				src: c.connID,
+				dst: c.dst,
+				hdr: &controlHeader{
+					packetType: typeShutdown,
+					connID:     c.remoteConnID,
+				},
+			}
 			return
 
 		case pkt := <-c.in:
@@ -294,22 +344,20 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 			// to it.
 
 			c.lastRecvSeqNo = binary.BigEndian.Uint32(data[8:])
-			c.lastAckedSeqNo = binary.BigEndian.Uint32(data[8:])
+			c.lastAckedSeqNo = c.lastRecvSeqNo
+			packetSize := int(binary.BigEndian.Uint32(data[12:]))
+			if packetSize < c.packetSize {
+				c.packetSize = packetSize
+			}
 			c.remoteConnID = binary.BigEndian.Uint32(data[24:])
+			cookie := binary.BigEndian.Uint32(data[28:])
 
 			data := make([]byte, (8*32+128)/8)
-			binary.BigEndian.PutUint32(data[0:], 4) // UDT version
-			binary.BigEndian.PutUint32(data[4:], 0) // STREAM
 			c.nextSeqNoMut.Lock()
-			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo) // Initial Sequence Number
+			handshakeData(data, c.nextSeqNo, uint32(c.packetSize), c.connID, cookie, connectionTypeResponse)
 			c.nextSeqNoMut.Unlock()
-			binary.BigEndian.PutUint32(data[12:], uint32(c.packetSize)) // Packet Size
-			binary.BigEndian.PutUint32(data[16:], 0)                    // Flow Window
-			binary.BigEndian.PutUint32(data[20:], 0)                    // Connection Type (TODO)
-			binary.BigEndian.PutUint32(data[24:], c.connID)             // Client Conn ID
-			binary.BigEndian.PutUint32(data[28:], 0)                    // Cookie (TODO)
-			binary.BigEndian.PutUint32(data[32:], 0)                    // Peer IP Address (TODO)
 			c.mux.out <- connPacket{
+				src: c.connID,
 				dst: c.dst,
 				hdr: &controlHeader{
 					packetType: typeHandshake,
@@ -322,10 +370,20 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 
 		case stateClientHandshake:
 			// We received a handshake response.
-			c.lastRecvSeqNo = binary.BigEndian.Uint32(data[8:])
-			c.lastAckedSeqNo = binary.BigEndian.Uint32(data[8:])
 			c.remoteConnID = binary.BigEndian.Uint32(data[24:])
-			c.setState(stateConnected)
+			if c.remoteConnID == 0 {
+				// Not actually a response, but a cookie challenge.
+				cookie := binary.BigEndian.Uint32(data[28:])
+				cookieCacheMut.Lock()
+				cookieCache[c.dst.String()] = cookie
+				cookieCacheMut.Unlock()
+				c.remoteCookieUpdate <- cookie
+			} else {
+				c.lastRecvSeqNo = binary.BigEndian.Uint32(data[8:])
+				c.packetSize = int(binary.BigEndian.Uint32(data[12:]))
+				c.lastAckedSeqNo = c.lastRecvSeqNo
+				c.setState(stateConnected)
+			}
 
 		default:
 			log.Println("handshake packet in non handshake mode")
@@ -395,6 +453,7 @@ func (c *Conn) sendACK() {
 	data := make([]byte, 4)
 	binary.BigEndian.PutUint32(data[:], c.lastRecvSeqNo+1)
 	c.mux.out <- connPacket{
+		src: c.connID,
 		dst: c.dst,
 		hdr: &controlHeader{
 			packetType: typeACK,
@@ -428,31 +487,22 @@ func (c *Conn) resetSyn(d time.Duration) {
 
 // String returns a string representation of the connection.
 func (c *Conn) String() string {
-	return fmt.Sprintf("Connection/%v/%v/@%p", c.LocalAddr(), c.RemoteAddr(), c)
+	return fmt.Sprintf("Connection-%08x/%v/%v", c.connID, c.LocalAddr(), c.RemoteAddr())
 }
 
 // Read reads data from the connection.
 // Read can be made to time out and return a Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetReadDeadline.
 func (c *Conn) Read(b []byte) (n int, err error) {
-	select {
-	case <-c.closed:
-		return 0, io.EOF
-	default:
-	}
-
 	c.inbufMut.Lock()
 	defer c.inbufMut.Unlock()
 	for len(c.inbuf) == 0 {
-		c.inbufCond.Wait()
-		// Connection may have closed while we were waiting.
 		select {
 		case <-c.closed:
-			if len(c.inbuf) == 0 {
-				return 0, io.EOF
-			}
+			return 0, io.EOF
 		default:
 		}
+		c.inbufCond.Wait()
 	}
 	n = copy(b, c.inbuf)
 	c.inbuf = c.inbuf[n:]
@@ -470,6 +520,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	}
 
 	sent := 0
+	sliceSize := c.packetSize - sliceOverhead
 	for i := 0; i < len(b); i += sliceSize {
 		nxt := i + sliceSize
 		if nxt > len(b) {
@@ -485,6 +536,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.nextMsgNo++
 
 		pkt := connPacket{
+			src: c.connID,
 			dst: c.dst,
 			hdr: &dataHeader{
 				sequenceNo: c.nextSeqNo,
@@ -513,9 +565,6 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.unacked = append(c.unacked, pkt)
 		c.unackedMut.Unlock()
 
-		if debugConnection {
-			log.Println(c, "Write", pkt)
-		}
 		c.mux.out <- pkt
 		sent += len(slice)
 		c.resetExp(defExpTime)
@@ -527,13 +576,6 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
-		c.mux.out <- connPacket{
-			dst: c.dst,
-			hdr: &controlHeader{
-				packetType: typeShutdown,
-				connID:     c.remoteConnID,
-			},
-		}
 		close(c.closed)
 		c.setState(stateClosed)
 		c.inbufMut.Lock()
@@ -542,7 +584,7 @@ func (c *Conn) Close() error {
 		c.unackedMut.Lock()
 		c.unackedCond.Broadcast()
 		c.unackedMut.Unlock()
-		c.mux.removeConnection(c.connID)
+		c.mux.removeConn(c)
 	})
 	return nil
 }

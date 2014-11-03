@@ -1,10 +1,10 @@
-package udt_test
+package miniudt_test
 
 import (
 	"net"
 	"testing"
 
-	"github.com/calmh/udt"
+	"github.com/calmh/miniudt"
 )
 
 func TestMuxNew(t *testing.T) {
@@ -13,7 +13,7 @@ func TestMuxNew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := udt.NewMux(conn)
+	mp := miniudt.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -25,7 +25,7 @@ func TestMuxClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := udt.NewMux(conn)
+	mp := miniudt.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -36,7 +36,7 @@ func TestMuxClose(t *testing.T) {
 	}
 
 	err = mp.Close()
-	if err != udt.ErrCloseClosed {
+	if err != miniudt.ErrCloseClosed {
 		t.Error("Unexpected error", err)
 	}
 }
@@ -47,7 +47,7 @@ func TestMuxAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := udt.NewMux(conn)
+	mp := miniudt.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}

@@ -1,4 +1,4 @@
-package udt
+package miniudt
 
 import (
 	"encoding/binary"
@@ -27,6 +27,13 @@ const (
 	//typeACK2                 = 0x6
 	//typeDrop                 = 0x7
 	//typeUser                 = 0x7fff
+)
+
+const (
+	connectionTypeRequest            = 1
+	connectionTypeResponse           = -1
+	connectionTypeRendezvous         = 0
+	connectionTypeRendezvousComplete = -2
 )
 
 type dataHeader struct {
@@ -114,4 +121,16 @@ func (h *controlHeader) unmarshal(bs []byte) {
 
 func (h *controlHeader) String() string {
 	return fmt.Sprintf("%#v", h)
+}
+
+func handshakeData(data []byte, seqNo, packetSize, connID, cookie uint32, connType int32) {
+	binary.BigEndian.PutUint32(data[0:], 4)                 // UDT version
+	binary.BigEndian.PutUint32(data[4:], 0)                 // Socket Type (STREAM)
+	binary.BigEndian.PutUint32(data[8:], seqNo)             // Initial Sequence Number
+	binary.BigEndian.PutUint32(data[12:], packetSize)       // Packet Size
+	binary.BigEndian.PutUint32(data[16:], 0)                // Flow Window
+	binary.BigEndian.PutUint32(data[20:], uint32(connType)) // Connection Type
+	binary.BigEndian.PutUint32(data[24:], connID)           // Client Conn ID
+	binary.BigEndian.PutUint32(data[28:], cookie)           // Cookie
+	binary.BigEndian.PutUint32(data[32:], 0)                // Peer IP Address (TODO)
 }

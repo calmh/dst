@@ -1,4 +1,4 @@
-package udt
+package miniudt
 
 import (
 	"bytes"
@@ -268,12 +268,16 @@ func TestTLSOnTop(t *testing.T) {
 }
 
 func TestTimeoutCloseWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow test")
+	}
+
 	a, b, err := connPair(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Sneakily close the server side of the connection
+	// Sneakily stop responding on the server side
 	close(b.closed)
 
 	for {
@@ -286,22 +290,3 @@ func TestTimeoutCloseWrite(t *testing.T) {
 		}
 	}
 }
-
-/*
-func TestTimeoutCloseRead(t *testing.T) {
-	a, b, err := connPair(0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Sneakily close the server side of the connection
-	close(b.closed)
-
-	// Attempt a read that should close at some point
-	_, err = a.Read([]byte("space to read stuff"))
-	if err != io.EOF {
-		t.Fatal("non-EOF error", err)
-
-	}
-}
-*/

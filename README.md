@@ -1,5 +1,5 @@
-udt
-===
+miniudt
+=======
 
 This is the start of an implementation of UDT in Go. The API supports
 the usual interfaces and should be fairly stable.
@@ -18,6 +18,7 @@ The following features are implemented:
  - Stream connections.
  - Client/server connection establishment.
  - Data transfer and resends based on ACK and receive timeouts.
+ - SYN cookies.
 
 The following features are *not* currently supported:
 
@@ -30,7 +31,7 @@ The following features are *not* currently supported:
 Documentation
 -------------
 
-http://godoc.org/github.com/calmh/udt
+http://godoc.org/github.com/calmh/miniudt
 
 License
 -------

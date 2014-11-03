@@ -1,9 +1,9 @@
-package udt_test
+package miniudt_test
 
 import (
 	"net"
 
-	"github.com/calmh/udt"
+	"github.com/calmh/miniudt"
 )
 
 func ExampleMux_Dial() {
@@ -14,7 +14,7 @@ func ExampleMux_Dial() {
 	}
 
 	// Create a UDT mux around the packet connection.
-	mux := udt.NewMux(udpConn)
+	mux := miniudt.NewMux(udpConn)
 
 	// Dial a UDT connection. The address is that of a remote UDT mux.
 	conn, err := mux.Dial("udt", "192.0.2.42:23458")
@@ -36,7 +36,7 @@ func ExampleMux_Accept() {
 	}
 
 	// Create a UDT mux around the packet connection.
-	mux := udt.NewMux(udpConn)
+	mux := miniudt.NewMux(udpConn)
 
 	// Accept new UDT connections and handle them in a separate routine.
 	for {

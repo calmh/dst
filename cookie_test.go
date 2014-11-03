@@ -1,4 +1,4 @@
-package udt
+package miniudt
 
 import (
 	"net"

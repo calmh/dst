@@ -1,7 +1,10 @@
-package udt
+package miniudt
 
 import (
+	"encoding/binary"
+	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -16,7 +19,9 @@ const (
 type Mux struct {
 	conn net.PacketConn
 
-	conns     map[uint32]*Conn
+	conns    map[uint32]*Conn
+	connsMut sync.Mutex
+
 	incoming  chan *Conn
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -31,6 +36,24 @@ func NewMux(conn net.PacketConn) *Mux {
 		incoming: make(chan *Conn, maxIncomingRequests),
 		closed:   make(chan struct{}),
 		out:      make(chan connPacket),
+	}
+
+	// Attempt to maximize buffer space. Start at 16 MB and work downwards 0.5
+	// MB at a time.
+
+	if conn, ok := conn.(*net.UDPConn); ok {
+		for buf := 16384 * 1024; buf >= 512*1024; buf -= 512 * 1024 {
+			err := conn.SetReadBuffer(buf)
+			if err == nil {
+				break
+			}
+		}
+		for buf := 16384 * 1024; buf >= 512*1024; buf -= 512 * 1024 {
+			err := conn.SetWriteBuffer(buf)
+			if err == nil {
+				break
+			}
+		}
 	}
 
 	go m.readerLoop()
@@ -112,13 +135,13 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 		return nil, err
 	}
 
-	conn := newConn(m)
-	conn.dst = dst
+	conn := newConn(m, dst)
+	conn.connID = m.newConn(conn)
 	conn.setState(stateClientHandshake)
-	m.conns[conn.connID] = conn
 
 	err = conn.handshake(5 * time.Second)
 	if err != nil {
+		m.removeConn(conn)
 		return nil, err
 	}
 
@@ -141,6 +164,10 @@ func (m *Mux) readerLoop() {
 		bufCopy := make([]byte, len(buf)-udtHeaderLen)
 		copy(bufCopy, buf[udtHeaderLen:])
 
+		if debugConnection {
+			log.Println(m, "Read", hdr)
+		}
+
 		switch hdr := hdr.(type) {
 		case *controlHeader:
 			if hdr.connID == 0 {
@@ -149,8 +176,28 @@ func (m *Mux) readerLoop() {
 					log.Printf("Got control packet type 0x%x with sockID 0", hdr.packetType)
 					continue
 				}
-				conn := newConn(m)
-				conn.dst = from
+
+				clientConnID := binary.BigEndian.Uint32(bufCopy[24:])
+				rcvdCookie := binary.BigEndian.Uint32(bufCopy[28:])
+				correctCookie := cookie(from)
+				if rcvdCookie != correctCookie {
+					// Incorrect or missing SYN cookie. Send back a handshake
+					// with the expected one.
+					data := make([]byte, (8*32+128)/8)
+					handshakeData(data, 0, 0, 0, correctCookie, connectionTypeResponse)
+					m.out <- connPacket{
+						dst: from,
+						hdr: &controlHeader{
+							packetType: typeHandshake,
+							connID:     clientConnID,
+						},
+						data: data,
+					}
+					continue
+				}
+
+				conn := newConn(m, from)
+				conn.connID = m.newConn(conn)
 				conn.setState(stateServerHandshake)
 				conn.in <- connPacket{
 					dst:  nil,
@@ -161,31 +208,38 @@ func (m *Mux) readerLoop() {
 				continue
 			}
 
+			m.connsMut.Lock()
 			conn, ok := m.conns[hdr.connID]
+			m.connsMut.Unlock()
 			if ok {
 				conn.in <- connPacket{
 					dst:  nil,
 					hdr:  hdr,
 					data: bufCopy,
 				}
-			} else if hdr.packetType != typeShutdown {
-				log.Println("Control packet for unknown conn", hdr.connID)
-				continue
+			} else if debugConnection && hdr.packetType != typeShutdown {
+				log.Printf("Control packet %v for unknown conn %08x", hdr, hdr.connID)
 			}
 
 		case *dataHeader:
+			m.connsMut.Lock()
 			conn, ok := m.conns[hdr.connID]
-			if !ok {
-				log.Println("Data packet for unknown conn", hdr.connID)
-				continue
-			}
-			conn.in <- connPacket{
-				dst:  nil,
-				hdr:  hdr,
-				data: bufCopy,
+			m.connsMut.Unlock()
+			if ok {
+				conn.in <- connPacket{
+					dst:  nil,
+					hdr:  hdr,
+					data: bufCopy,
+				}
+			} else if debugConnection {
+				log.Printf("Data packet for unknown conn %08x", hdr.connID)
 			}
 		}
 	}
+}
+
+func (m *Mux) String() string {
+	return fmt.Sprintf("Mux-%v", m.Addr())
 }
 
 func (m *Mux) writerLoop() {
@@ -201,6 +255,9 @@ func (m *Mux) writerLoop() {
 			hdr.marshal(buf)
 		}
 		copy(buf[16:], sp.data)
+		if debugConnection {
+			log.Println(m, "Write", sp)
+		}
 		_, err := m.conn.WriteTo(buf, sp.dst)
 		if err != nil {
 			panic(err)
@@ -208,6 +265,21 @@ func (m *Mux) writerLoop() {
 	}
 }
 
-func (m *Mux) removeConnection(connID uint32) {
-	delete(m.conns, connID)
+func (m *Mux) newConn(c *Conn) uint32 {
+	// Find a unique connection ID
+	m.connsMut.Lock()
+	connID := uint32(rand.Int31())
+	for _, ok := m.conns[connID]; ok; _, ok = m.conns[connID] {
+		connID = uint32(rand.Int31())
+	}
+	m.conns[connID] = c
+	m.connsMut.Unlock()
+
+	return connID
+}
+
+func (m *Mux) removeConn(c *Conn) {
+	m.connsMut.Lock()
+	delete(m.conns, c.connID)
+	m.connsMut.Unlock()
 }
