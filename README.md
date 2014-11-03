@@ -7,6 +7,8 @@ the usual interfaces and should be fairly stable.
 > !!!
 > This is not a complete implementation of UDT. This package will not
 > communicate successfully with the default/standard implementation.
+> Many aspects are simply not implemented, other differ intentionally
+> (i.e. KeepAlive and Shutdown handling).
 > !!!
 
 The following features are implemented:
@@ -19,6 +21,7 @@ The following features are implemented:
 
 The following features are *not* currently supported:
 
+ - High performance.
  - Rendezvous connection establishment.
  - Congestion control.
  - Messaging mode connections.

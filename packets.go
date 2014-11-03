@@ -7,6 +7,8 @@ import (
 
 type position uint8
 
+const udtHeaderLen = 16
+
 const (
 	positionMiddle position = iota
 	positionLast
@@ -21,7 +23,7 @@ const (
 	typeKeepAlive            = 0x1
 	typeACK                  = 0x2
 	//typeNAK                  = 0x3
-	//typeShutdown             = 0x5
+	typeShutdown = 0x5
 	//typeACK2                 = 0x6
 	//typeDrop                 = 0x7
 	//typeUser                 = 0x7fff
@@ -37,7 +39,6 @@ type dataHeader struct {
 }
 
 type header interface {
-	len() int
 	marshal(bs []byte)
 	String() string
 }
@@ -85,10 +86,6 @@ func (h *dataHeader) unmarshal(bs []byte) {
 	h.connID = binary.BigEndian.Uint32(bs[12:])
 }
 
-func (h *dataHeader) len() int {
-	return 16
-}
-
 func (h *dataHeader) String() string {
 	return fmt.Sprintf("%#v", h)
 }
@@ -113,10 +110,6 @@ func (h *controlHeader) unmarshal(bs []byte) {
 	h.additional = binary.BigEndian.Uint32(bs[4:])
 	h.timestamp = binary.BigEndian.Uint32(bs[8:])
 	h.connID = binary.BigEndian.Uint32(bs[12:])
-}
-
-func (h *controlHeader) len() int {
-	return 16
 }
 
 func (h *controlHeader) String() string {

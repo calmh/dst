@@ -12,21 +12,7 @@ const (
 	maxMessageSize      = 128 * 1024 //bytes
 )
 
-type Error struct {
-	Err string
-}
-
-func (e Error) Error() string {
-	return e.Err
-}
-
-var (
-	ErrCloseClosed   = &Error{"close on already closed multiple"}
-	ErrAcceptClosed  = &Error{"accept on closed Mux"}
-	ErrNotUDTNetwork = &Error{"network is not udt"}
-)
-
-// Mux implements net.Listener and Dial
+// Mux is a UDP multiplexer of UDT connections.
 type Mux struct {
 	conn net.PacketConn
 
@@ -99,7 +85,7 @@ func (m *Mux) Addr() net.Addr {
 //	Dial("udt", "[2001:db8::1]:http")
 //	Dial("udt", "[fe80::1%lo0]:80")
 func (m *Mux) Dial(network, addr string) (*Conn, error) {
-	return m.Dial(network, addr)
+	return m.DialUDT(network, addr)
 }
 
 // Dial connects to the address on the named network.
@@ -152,13 +138,15 @@ func (m *Mux) readerLoop() {
 
 		buf = buf[:n]
 		hdr := unmarshalHeader(buf)
+		bufCopy := make([]byte, len(buf)-udtHeaderLen)
+		copy(bufCopy, buf[udtHeaderLen:])
 
 		switch hdr := hdr.(type) {
 		case *controlHeader:
 			if hdr.connID == 0 {
 				// This should be a handshake packet
 				if hdr.packetType != typeHandshake {
-					log.Println("Got control packet type 0x%x with sockID 0", hdr.packetType)
+					log.Printf("Got control packet type 0x%x with sockID 0", hdr.packetType)
 					continue
 				}
 				conn := newConn(m)
@@ -167,21 +155,22 @@ func (m *Mux) readerLoop() {
 				conn.in <- connPacket{
 					dst:  nil,
 					hdr:  hdr,
-					data: buf[hdr.len():],
+					data: bufCopy,
 				}
 				m.incoming <- conn
 				continue
 			}
 
 			conn, ok := m.conns[hdr.connID]
-			if !ok {
+			if ok {
+				conn.in <- connPacket{
+					dst:  nil,
+					hdr:  hdr,
+					data: bufCopy,
+				}
+			} else if hdr.packetType != typeShutdown {
 				log.Println("Control packet for unknown conn", hdr.connID)
 				continue
-			}
-			conn.in <- connPacket{
-				dst:  nil,
-				hdr:  hdr,
-				data: buf[hdr.len():],
 			}
 
 		case *dataHeader:
@@ -190,8 +179,6 @@ func (m *Mux) readerLoop() {
 				log.Println("Data packet for unknown conn", hdr.connID)
 				continue
 			}
-			bufCopy := make([]byte, len(buf)-hdr.len())
-			copy(bufCopy, buf[hdr.len():])
 			conn.in <- connPacket{
 				dst:  nil,
 				hdr:  hdr,
@@ -204,7 +191,7 @@ func (m *Mux) readerLoop() {
 func (m *Mux) writerLoop() {
 	buf := make([]byte, 65536)
 	for sp := range m.out {
-		buf = buf[:sp.hdr.len()+len(sp.data)]
+		buf = buf[:udtHeaderLen+len(sp.data)]
 		switch hdr := sp.hdr.(type) {
 		case *dataHeader:
 			hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
@@ -219,4 +206,8 @@ func (m *Mux) writerLoop() {
 			panic(err)
 		}
 	}
+}
+
+func (m *Mux) removeConnection(connID uint32) {
+	delete(m.conns, connID)
 }

@@ -3,6 +3,7 @@ package udt
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -11,15 +12,18 @@ import (
 )
 
 const (
-	defExpTime = 50 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	defSynTime = 10 * time.Millisecond
+	defExpTime    = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
+	defSynTime    = 10 * time.Millisecond
+	expCountClose = 16                                                         // close connection after this many EXPs
+	minTimeClose  = 15 * time.Second                                           // if at least this long has passed
+	sliceSize     = 1500 - 8 /*pppoe, similar*/ - 20 /*ipv4*/ - 8 /*udp*/ - 16 /*udt*/
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-// Conn implements net.Conn
+// Conn is a UDT connection carried over a Mux.
 type Conn struct {
 	mux *Mux
 	dst net.Addr
@@ -27,6 +31,7 @@ type Conn struct {
 	connID        uint32
 	remoteConnID  uint32
 	nextSeqNo     uint32
+	nextSeqNoMut  sync.Mutex
 	nextMsgNo     uint32
 	packetSize    int
 	interPktDelay time.Duration
@@ -51,14 +56,17 @@ type Conn struct {
 	lastRecvSeqNo  uint32
 	lastAckedSeqNo uint32
 
-	exp      *time.Timer
 	expCount int
-	expMut   sync.Mutex
+	expReset time.Time
+
+	exp    *time.Timer
+	expMut sync.Mutex
 
 	syn    *time.Timer
 	synMut sync.Mutex
 
-	closed chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 
 	debugResetRecvSeqNo chan uint32
 }
@@ -87,18 +95,13 @@ const (
 	stateClosed
 )
 
-var (
-	ErrHandshakeTimeout = &Error{"handshake timeout"}
-	ErrClosed           = &Error{"operation on closed connection"}
-)
-
 func newConn(m *Mux) *Conn {
 	conn := &Conn{
 		mux:        m,
 		connID:     uint32(rand.Int31()),
 		nextSeqNo:  uint32(rand.Int31()),
 		packetSize: 1500,
-		maxUnacked: 128,
+		maxUnacked: 16,
 		in:         make(chan connPacket),
 		closed:     make(chan struct{}),
 	}
@@ -111,6 +114,7 @@ func newConn(m *Mux) *Conn {
 	conn.syn = time.NewTimer(defSynTime)
 
 	conn.debugResetRecvSeqNo = make(chan uint32)
+	conn.expReset = time.Now()
 
 	m.conns[conn.connID] = conn
 	go conn.reader()
@@ -179,14 +183,16 @@ func (c *Conn) handshake(timeout time.Duration) error {
 			}
 
 		case <-tz.C:
-			c.setState(stateClosed)
+			c.Close()
 			return ErrHandshakeTimeout
 
 		case <-t0.C:
 			data := make([]byte, (8*32+128)/8)
-			binary.BigEndian.PutUint32(data[0:], 4)                     // UDT version
-			binary.BigEndian.PutUint32(data[4:], 0)                     // STREAM
-			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo)           // Initial Sequence Number
+			binary.BigEndian.PutUint32(data[0:], 4) // UDT version
+			binary.BigEndian.PutUint32(data[4:], 0)
+			c.nextSeqNoMut.Lock()
+			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo) // Initial Sequence Number
+			c.nextSeqNoMut.Unlock()
 			binary.BigEndian.PutUint32(data[12:], uint32(c.packetSize)) // Packet Size
 			binary.BigEndian.PutUint32(data[16:], 0)                    // Flow Window
 			binary.BigEndian.PutUint32(data[20:], 0)                    // Connection Type (TODO)
@@ -222,7 +228,14 @@ func (c *Conn) reader() {
 			if debugConnection {
 				log.Println(c, "Read", pkt)
 			}
+
 			c.expCount = 1
+			c.expReset = time.Now()
+			c.unackedMut.Lock()
+			if len(c.unacked) == 0 {
+				c.resetExp(defExpTime)
+			}
+			c.unackedMut.Unlock()
 
 			switch hdr := pkt.hdr.(type) {
 			case *controlHeader:
@@ -236,8 +249,11 @@ func (c *Conn) reader() {
 			if c.getState() != stateConnected {
 				continue
 			}
+
+			resent := false
 			c.unackedMut.Lock()
 			if len(c.unacked) > 0 {
+				resent = true
 				if debugConnection {
 					log.Println(c, "Resend")
 				}
@@ -246,7 +262,11 @@ func (c *Conn) reader() {
 				}
 			}
 			c.unackedMut.Unlock()
+
 			c.expCount++
+			if resent && c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
+				c.Close()
+			}
 			c.resetExp(time.Duration(c.expCount) * defExpTime)
 
 		case <-c.syn.C:
@@ -278,9 +298,11 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 			c.remoteConnID = binary.BigEndian.Uint32(data[24:])
 
 			data := make([]byte, (8*32+128)/8)
-			binary.BigEndian.PutUint32(data[0:], 4)                     // UDT version
-			binary.BigEndian.PutUint32(data[4:], 0)                     // STREAM
-			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo)           // Initial Sequence Number
+			binary.BigEndian.PutUint32(data[0:], 4) // UDT version
+			binary.BigEndian.PutUint32(data[4:], 0) // STREAM
+			c.nextSeqNoMut.Lock()
+			binary.BigEndian.PutUint32(data[8:], c.nextSeqNo) // Initial Sequence Number
+			c.nextSeqNoMut.Unlock()
 			binary.BigEndian.PutUint32(data[12:], uint32(c.packetSize)) // Packet Size
 			binary.BigEndian.PutUint32(data[16:], 0)                    // Flow Window
 			binary.BigEndian.PutUint32(data[20:], 0)                    // Connection Type (TODO)
@@ -333,11 +355,13 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 			c.unackedCond.Broadcast()
 		}
 		c.unackedMut.Unlock()
-
 		c.resetExp(defExpTime)
 
 	case typeKeepAlive:
-		log.Println("got keepalive")
+		// do nothing
+
+	case typeShutdown:
+		c.Close()
 	}
 }
 
@@ -404,7 +428,7 @@ func (c *Conn) resetSyn(d time.Duration) {
 
 // String returns a string representation of the connection.
 func (c *Conn) String() string {
-	return fmt.Sprintf("Connection@%p", c)
+	return fmt.Sprintf("Connection/%v/%v/@%p", c.LocalAddr(), c.RemoteAddr(), c)
 }
 
 // Read reads data from the connection.
@@ -413,7 +437,7 @@ func (c *Conn) String() string {
 func (c *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case <-c.closed:
-		return 0, ErrClosed
+		return 0, io.EOF
 	default:
 	}
 
@@ -421,6 +445,14 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	defer c.inbufMut.Unlock()
 	for len(c.inbuf) == 0 {
 		c.inbufCond.Wait()
+		// Connection may have closed while we were waiting.
+		select {
+		case <-c.closed:
+			if len(c.inbuf) == 0 {
+				return 0, io.EOF
+			}
+		default:
+		}
 	}
 	n = copy(b, c.inbuf)
 	c.inbuf = c.inbuf[n:]
@@ -437,14 +469,17 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	default:
 	}
 
-	sliceSize := c.packetSize - (&dataHeader{}).len()
+	sent := 0
 	for i := 0; i < len(b); i += sliceSize {
 		nxt := i + sliceSize
 		if nxt > len(b) {
 			nxt = len(b)
 		}
 		slice := b[i:nxt]
+		sliceCopy := make([]byte, len(slice))
+		copy(sliceCopy, slice)
 
+		c.nextSeqNoMut.Lock()
 		c.nextSeqNo += uint32(len(slice))
 		c.nextSeqNo &= uint32(1<<31 - 1)
 		c.nextMsgNo++
@@ -458,8 +493,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				messageNo:  c.nextMsgNo,
 				connID:     c.remoteConnID,
 			},
-			data: slice,
+			data: sliceCopy,
 		}
+		c.nextSeqNoMut.Unlock()
 
 		c.unackedMut.Lock()
 		for len(c.unacked) == c.maxUnacked {
@@ -467,6 +503,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				log.Println(c, "Write blocked")
 			}
 			c.unackedCond.Wait()
+			// Connection may have closed while we were waiting
+			select {
+			case <-c.closed:
+				return sent, ErrClosed
+			default:
+			}
 		}
 		c.unacked = append(c.unacked, pkt)
 		c.unackedMut.Unlock()
@@ -475,31 +517,44 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			log.Println(c, "Write", pkt)
 		}
 		c.mux.out <- pkt
+		sent += len(slice)
 		c.resetExp(defExpTime)
 	}
-	return len(b), nil
+	return sent, nil
 }
 
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
-	select {
-	default:
+	c.closeOnce.Do(func() {
+		c.mux.out <- connPacket{
+			dst: c.dst,
+			hdr: &controlHeader{
+				packetType: typeShutdown,
+				connID:     c.remoteConnID,
+			},
+		}
 		close(c.closed)
 		c.setState(stateClosed)
-	case <-c.closed:
-	}
+		c.inbufMut.Lock()
+		c.inbufCond.Broadcast()
+		c.inbufMut.Unlock()
+		c.unackedMut.Lock()
+		c.unackedCond.Broadcast()
+		c.unackedMut.Unlock()
+		c.mux.removeConnection(c.connID)
+	})
 	return nil
 }
 
 // LocalAddr returns the local network address.
 func (c *Conn) LocalAddr() net.Addr {
-	panic("unimplemented")
+	return c.mux.Addr()
 }
 
 // RemoteAddr returns the remote network address.
 func (c *Conn) RemoteAddr() net.Addr {
-	panic("unimplemented")
+	return c.dst
 }
 
 // SetDeadline sets the read and write deadlines associated
@@ -516,13 +571,13 @@ func (c *Conn) RemoteAddr() net.Addr {
 //
 // A zero value for t means I/O operations will not time out.
 func (c *Conn) SetDeadline(t time.Time) error {
-	panic("unimplemented")
+	return nil
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 // A zero value for t means Read will not time out.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	panic("unimplemented")
+	return nil
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
@@ -530,5 +585,5 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // some of the data was successfully written.
 // A zero value for t means Write will not time out.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	panic("unimplemented")
+	return nil
 }

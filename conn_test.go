@@ -3,15 +3,54 @@ package udt
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"io"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestHandshake(t *testing.T) {
 	_, _, err := connPair(0, 0)
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+func TestAddrs(t *testing.T) {
+	a, b, err := connPair(0, 0)
+	if err != nil {
+		t.Error(err)
+	}
+
+	als := a.LocalAddr().String()
+	ars := a.RemoteAddr().String()
+	bls := b.LocalAddr().String()
+	brs := b.RemoteAddr().String()
+	if !strings.HasPrefix(als, "127.0.0.1") {
+		t.Errorf("A local %s missing 127.0.0.1 prefix", als)
+	}
+	if !strings.HasPrefix(bls, "127.0.0.1") {
+		t.Errorf("B local %s missing 127.0.0.1 prefix", bls)
+	}
+	if als == ars {
+		t.Errorf("A remote == A local address; %s", als)
+	}
+	if bls == brs {
+		t.Errorf("B remote == B local address; %s", bls)
+	}
+	if als == bls {
+		t.Errorf("A local == B local address; %s", als)
+	}
+	if ars == brs {
+		t.Errorf("A remote == B remote address; %s", ars)
+	}
+	if ars != bls {
+		t.Errorf("A remote %s != B local %s", ars, bls)
+	}
+	if als != brs {
+		t.Errorf("A local %s != B remote %s", als, brs)
 	}
 }
 
@@ -48,7 +87,7 @@ func TestSingleDataPacket(t *testing.T) {
 }
 
 func TestClosedReadWrite(t *testing.T) {
-	a, _, err := connPair(0, 0)
+	a, b, err := connPair(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +108,21 @@ func TestClosedReadWrite(t *testing.T) {
 	}
 
 	_, err = a.Read([]byte("something"))
+	if err != io.EOF {
+		t.Error("Unexpected non-EOF error", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	// b should also have closed
+
+	_, err = b.Write([]byte("something"))
 	if err != ErrClosed {
 		t.Error("Unexpected non-ErrClosed error", err)
+	}
+
+	_, err = b.Read([]byte("something"))
+	if err != io.EOF {
+		t.Error("Unexpected non-EOF error", err)
 	}
 }
 
@@ -174,3 +226,82 @@ func TestLargeDataLossy(t *testing.T) {
 		t.Errorf("Incorrect data % x != % x", data[:16], src[:16])
 	}
 }
+
+func TestTLSOnTop(t *testing.T) {
+	keypair, err := tls.LoadX509KeyPair("testdata/cert.pem", "testdata/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverConfig := &tls.Config{
+		Certificates: []tls.Certificate{keypair},
+	}
+
+	clientConfig := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	a, b, err := connPair(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := tls.Client(b, clientConfig)
+	server := tls.Server(a, serverConfig)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := server.Handshake()
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	err = client.Handshake()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wg.Wait()
+}
+
+func TestTimeoutCloseWrite(t *testing.T) {
+	a, b, err := connPair(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Sneakily close the server side of the connection
+	close(b.closed)
+
+	for {
+		_, err := a.Write([]byte("stuff to write"))
+		if err == ErrClosed {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+/*
+func TestTimeoutCloseRead(t *testing.T) {
+	a, b, err := connPair(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Sneakily close the server side of the connection
+	close(b.closed)
+
+	// Attempt a read that should close at some point
+	_, err = a.Read([]byte("space to read stuff"))
+	if err != io.EOF {
+		t.Fatal("non-EOF error", err)
+
+	}
+}
+*/
