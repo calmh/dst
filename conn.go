@@ -8,17 +8,19 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	defExpTime        = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
 	defSynTime        = 10 * time.Millisecond
+	maxUnackedPkts    = 16
 	expCountClose     = 16               // close connection after this many EXPs
 	minTimeClose      = 15 * time.Second // if at least this long has passed
 	handshakeInterval = time.Second
 
-	sliceOverhead = 8 /*pppoe, similar*/ - 20 /*ipv4*/ - 8 /*udp*/ - 16 /*udt*/
+	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*udt*/
 )
 
 func init() {
@@ -34,18 +36,19 @@ var (
 
 // Conn is a UDT connection carried over a Mux.
 type Conn struct {
-	mux *Mux
-	dst net.Addr
+	// Set at creation, thereafter immutable:
 
+	mux          *Mux
+	dst          net.Addr
 	connID       uint32
 	remoteConnID uint32
-	nextSeqNo    uint32
-	nextSeqNoMut sync.Mutex
-	nextMsgNo    uint32
-	packetSize   int
+	in           chan connPacket
 
-	remoteCookie       uint32
-	remoteCookieUpdate chan uint32
+	// Touched by more than one goroutine, needs locking.
+
+	nextSeqNo    uint32
+	nextMsgNo    uint32
+	nextSeqNoMut sync.Mutex
 
 	inbuf     []byte
 	inbufMut  sync.Mutex
@@ -56,19 +59,9 @@ type Conn struct {
 	unackedMut  sync.Mutex
 	unackedCond *sync.Cond
 
-	rcvdUnacked int
-
-	in chan connPacket
-
 	currentState connState
 	stateMut     sync.Mutex
 	stateCond    *sync.Cond
-
-	lastRecvSeqNo  uint32
-	lastAckedSeqNo uint32
-
-	expCount int
-	expReset time.Time
 
 	exp    *time.Timer
 	expMut sync.Mutex
@@ -76,10 +69,34 @@ type Conn struct {
 	syn    *time.Timer
 	synMut sync.Mutex
 
+	packetSize int
+
+	// Only touched by the reader routine, needs no locking
+
+	rcvdUnacked int
+
+	lastRecvSeqNo  uint32
+	lastAckedSeqNo uint32
+
+	expCount int
+	expReset time.Time
+
+	// Only touched by the handshake routine, needs no locking
+
+	remoteCookie       uint32
+	remoteCookieUpdate chan uint32
+
+	// Special
+
 	closed    chan struct{}
 	closeOnce sync.Once
 
 	debugResetRecvSeqNo chan uint32
+
+	dataPacketsIn  uint64
+	dataPacketsOut uint64
+	dataBytesIn    uint64
+	dataBytesOut   uint64
 }
 
 type connPacket struct {
@@ -120,14 +137,14 @@ func (s connState) String() string {
 	}
 }
 
-func newConn(m *Mux, dst net.Addr) *Conn {
+func newConn(m *Mux, dst net.Addr, size int) *Conn {
 	conn := &Conn{
 		mux:        m,
 		dst:        dst,
 		nextSeqNo:  uint32(rand.Int31()),
-		packetSize: 1500,
-		maxUnacked: 16,
-		in:         make(chan connPacket, 16),
+		packetSize: size,
+		maxUnacked: maxUnackedPkts,
+		in:         make(chan connPacket, maxUnackedPkts),
 		closed:     make(chan struct{}),
 	}
 
@@ -424,6 +441,7 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 }
 
 func (c *Conn) processDataPacket(hdr *dataHeader, data []byte) {
+	atomic.AddUint64(&c.dataPacketsIn, 1)
 	expected := (c.lastRecvSeqNo + uint32(len(data))) & (1<<31 - 1)
 	if hdr.sequenceNo == expected {
 		// An in-sequence packet.
@@ -439,6 +457,7 @@ func (c *Conn) processDataPacket(hdr *dataHeader, data []byte) {
 		c.inbuf = append(c.inbuf, data...)
 		c.inbufCond.Signal()
 		c.inbufMut.Unlock()
+		atomic.AddUint64(&c.dataBytesIn, uint64(len(data)))
 	} else if diff := hdr.sequenceNo - expected; diff > 1<<30 {
 		if debugConnection {
 			log.Println(c, "old packet received; seq", hdr.sequenceNo, "expected", expected)
@@ -566,6 +585,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.unackedMut.Unlock()
 
 		c.mux.out <- pkt
+		atomic.AddUint64(&c.dataPacketsOut, 1)
+		atomic.AddUint64(&c.dataBytesOut, uint64(len(slice)))
 		sent += len(slice)
 		c.resetExp(defExpTime)
 	}
@@ -576,6 +597,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
+		c.mux.removeConn(c)
 		close(c.closed)
 		c.setState(stateClosed)
 		c.inbufMut.Lock()
@@ -584,7 +606,6 @@ func (c *Conn) Close() error {
 		c.unackedMut.Lock()
 		c.unackedCond.Broadcast()
 		c.unackedMut.Unlock()
-		c.mux.removeConn(c)
 	})
 	return nil
 }
@@ -628,4 +649,20 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // A zero value for t means Write will not time out.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return nil
+}
+
+type Statistics struct {
+	DataPacketsIn  uint64
+	DataPacketsOut uint64
+	DataBytesIn    uint64
+	DataBytesOut   uint64
+}
+
+func (c *Conn) GetStatistics() Statistics {
+	return Statistics{
+		DataPacketsIn:  atomic.LoadUint64(&c.dataPacketsIn),
+		DataPacketsOut: atomic.LoadUint64(&c.dataPacketsOut),
+		DataBytesIn:    atomic.LoadUint64(&c.dataBytesIn),
+		DataBytesOut:   atomic.LoadUint64(&c.dataBytesOut),
+	}
 }

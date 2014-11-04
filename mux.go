@@ -26,16 +26,20 @@ type Mux struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 	out       chan connPacket
+
+	packetSize    int
+	packetSizeMut sync.Mutex
 }
 
 // NewMux creates a new UDT Mux on top of a packet connection.
 func NewMux(conn net.PacketConn) *Mux {
 	m := &Mux{
-		conn:     conn,
-		conns:    map[uint32]*Conn{},
-		incoming: make(chan *Conn, maxIncomingRequests),
-		closed:   make(chan struct{}),
-		out:      make(chan connPacket),
+		conn:       conn,
+		conns:      map[uint32]*Conn{},
+		incoming:   make(chan *Conn, maxIncomingRequests),
+		closed:     make(chan struct{}),
+		out:        make(chan connPacket),
+		packetSize: 1500,
 	}
 
 	// Attempt to maximize buffer space. Start at 16 MB and work downwards 0.5
@@ -135,7 +139,11 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 		return nil, err
 	}
 
-	conn := newConn(m, dst)
+	m.packetSizeMut.Lock()
+	packetSize := m.packetSize
+	m.packetSizeMut.Unlock()
+
+	conn := newConn(m, dst, packetSize)
 	conn.connID = m.newConn(conn)
 	conn.setState(stateClientHandshake)
 
@@ -146,6 +154,12 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 	}
 
 	return conn, nil
+}
+
+func (m *Mux) SetPacketSize(size int) {
+	m.packetSizeMut.Lock()
+	m.packetSize = size
+	m.packetSizeMut.Unlock()
 }
 
 func (m *Mux) readerLoop() {
@@ -196,7 +210,11 @@ func (m *Mux) readerLoop() {
 					continue
 				}
 
-				conn := newConn(m, from)
+				m.packetSizeMut.Lock()
+				packetSize := m.packetSize
+				m.packetSizeMut.Unlock()
+
+				conn := newConn(m, from, packetSize)
 				conn.connID = m.newConn(conn)
 				conn.setState(stateServerHandshake)
 				conn.in <- connPacket{

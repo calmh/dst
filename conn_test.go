@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/tls"
+	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -288,5 +290,60 @@ func TestTimeoutCloseWrite(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestPacketSize(t *testing.T) {
+	connA, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxA := NewMux(connA)
+	muxA.SetPacketSize(256)
+
+	connB, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxB := NewMux(connB)
+
+	errors := make(chan error)
+	go func() {
+		conn, err := muxA.AcceptUDT()
+		if err != nil {
+			errors <- err
+			return
+		}
+
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			errors <- err
+			return
+		}
+
+		stats := conn.GetStatistics()
+		if n > 256 && stats.DataPacketsIn < 5 {
+			errors <- fmt.Errorf("Too much data read; %d bytes in %d packets", n, stats.DataPacketsIn)
+			return
+		}
+		errors <- nil
+	}()
+
+	conn, err := muxB.Dial("udt", muxA.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1024)
+	n, err := conn.Write(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1024 {
+		t.Errorf("Too little data written; %d bytes", n)
+	}
+
+	if err = <-errors; err != nil {
+		t.Error(err)
 	}
 }
