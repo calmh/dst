@@ -143,7 +143,7 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 	packetSize := m.packetSize
 	m.packetSizeMut.Unlock()
 
-	conn := newConn(m, dst, packetSize)
+	conn := newConn(m, dst, packetSize, nil)
 	conn.connID = m.newConn(conn)
 	conn.setState(stateClientHandshake)
 
@@ -214,7 +214,7 @@ func (m *Mux) readerLoop() {
 				packetSize := m.packetSize
 				m.packetSizeMut.Unlock()
 
-				conn := newConn(m, from, packetSize)
+				conn := newConn(m, from, packetSize, nil)
 				conn.connID = m.newConn(conn)
 				conn.setState(stateServerHandshake)
 				conn.in <- connPacket{

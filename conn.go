@@ -34,6 +34,13 @@ var (
 	cookieCacheMut sync.Mutex
 )
 
+type CongestionController interface {
+	Ack()
+	Exp()
+	SendWindow() int
+	AckPacketIntv() int
+}
+
 // Conn is a UDT connection carried over a Mux.
 type Conn struct {
 	// Set at creation, thereafter immutable:
@@ -43,6 +50,7 @@ type Conn struct {
 	connID       uint32
 	remoteConnID uint32
 	in           chan connPacket
+	cc           CongestionController
 
 	// Touched by more than one goroutine, needs locking.
 
@@ -137,15 +145,16 @@ func (s connState) String() string {
 	}
 }
 
-func newConn(m *Mux, dst net.Addr, size int) *Conn {
+func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn := &Conn{
 		mux:        m,
 		dst:        dst,
 		nextSeqNo:  uint32(rand.Int31()),
 		packetSize: size,
 		maxUnacked: maxUnackedPkts,
-		in:         make(chan connPacket, maxUnackedPkts),
+		in:         make(chan connPacket, 1024),
 		closed:     make(chan struct{}),
+		cc:         cc,
 	}
 
 	cookieCacheMut.Lock()
@@ -162,6 +171,11 @@ func newConn(m *Mux, dst net.Addr, size int) *Conn {
 	conn.remoteCookieUpdate = make(chan uint32)
 	conn.debugResetRecvSeqNo = make(chan uint32)
 	conn.expReset = time.Now()
+
+	if conn.cc == nil {
+		conn.cc = NewWindowCC(maxUnackedPkts)
+		conn.maxUnacked = conn.cc.SendWindow()
+	}
 
 	go conn.reader()
 	return conn
@@ -322,11 +336,13 @@ func (c *Conn) reader() {
 			if len(c.unacked) > 0 {
 				resent = true
 				if debugConnection {
-					log.Println(c, "Resend")
+					log.Println(c, "Resend", len(c.unacked))
 				}
 				for _, pkt := range c.unacked {
 					c.mux.out <- pkt
 				}
+				c.cc.Exp()
+				c.maxUnacked = c.cc.SendWindow()
 			}
 			c.unackedMut.Unlock()
 
@@ -426,6 +442,8 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 		// that might be blocked.
 
 		if cut > 0 {
+			c.cc.Ack()
+			c.maxUnacked = c.cc.SendWindow()
 			c.unacked = c.unacked[cut:]
 			c.unackedCond.Broadcast()
 		}
@@ -449,7 +467,7 @@ func (c *Conn) processDataPacket(hdr *dataHeader, data []byte) {
 		c.lastRecvSeqNo = hdr.sequenceNo
 		c.rcvdUnacked++
 
-		if c.rcvdUnacked >= c.maxUnacked/2 {
+		if c.rcvdUnacked >= c.cc.AckPacketIntv() {
 			c.sendACK()
 		}
 
@@ -569,7 +587,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.nextSeqNoMut.Unlock()
 
 		c.unackedMut.Lock()
-		for len(c.unacked) == c.maxUnacked {
+		for len(c.unacked) >= c.maxUnacked {
 			if debugConnection {
 				log.Println(c, "Write blocked")
 			}

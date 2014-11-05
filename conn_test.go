@@ -323,7 +323,7 @@ func TestPacketSize(t *testing.T) {
 		}
 
 		stats := conn.GetStatistics()
-		if n > 256 && stats.DataPacketsIn < 5 {
+		if uint64(n)/stats.DataPacketsIn > 256 {
 			errors <- fmt.Errorf("Too much data read; %d bytes in %d packets", n, stats.DataPacketsIn)
 			return
 		}
