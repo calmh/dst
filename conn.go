@@ -1,7 +1,6 @@
 package miniudt
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -62,10 +61,14 @@ type Conn struct {
 	inbufMut  sync.Mutex
 	inbufCond *sync.Cond
 
-	unacked     []connPacket
-	maxUnacked  int
-	unackedMut  sync.Mutex
-	unackedCond *sync.Cond
+	sendBuffer      []connPacket
+	sendBufferSend  int
+	sendBufferWrite int
+	sendLost        []connPacket
+	sendLostSend    int
+	sendWindow      int
+	unackedMut      sync.Mutex
+	unackedCond     *sync.Cond
 
 	currentState connState
 	stateMut     sync.Mutex
@@ -101,10 +104,12 @@ type Conn struct {
 
 	debugResetRecvSeqNo chan uint32
 
-	dataPacketsIn  uint64
-	dataPacketsOut uint64
-	dataBytesIn    uint64
-	dataBytesOut   uint64
+	packetsIn      uint64
+	packetsOut     uint64
+	bytesIn        uint64
+	bytesOut       uint64
+	resentPackets  uint64
+	droppedPackets uint64
 }
 
 type connPacket struct {
@@ -151,7 +156,6 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 		dst:        dst,
 		nextSeqNo:  uint32(rand.Int31()),
 		packetSize: size,
-		maxUnacked: maxUnackedPkts,
 		in:         make(chan connPacket, 1024),
 		closed:     make(chan struct{}),
 		cc:         cc,
@@ -164,6 +168,7 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn.unackedCond = sync.NewCond(&conn.unackedMut)
 	conn.stateCond = sync.NewCond(&conn.stateMut)
 	conn.inbufCond = sync.NewCond(&conn.inbufMut)
+	conn.sendBuffer = make([]connPacket, 16)
 
 	conn.exp = time.NewTimer(defExpTime)
 	conn.syn = time.NewTimer(defSynTime)
@@ -173,11 +178,13 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn.expReset = time.Now()
 
 	if conn.cc == nil {
-		conn.cc = NewWindowCC(maxUnackedPkts)
-		conn.maxUnacked = conn.cc.SendWindow()
+		conn.cc = NewWindowCC()
+		conn.adjustSendBuffer()
 	}
 
 	go conn.reader()
+	go conn.writer()
+
 	return conn
 }
 
@@ -262,20 +269,21 @@ func (c *Conn) handshake(timeout time.Duration) error {
 		case <-nextHandshake.C:
 			// Send a handshake request.
 
-			data := make([]byte, (8*32+128)/8)
+			data := make([]byte, 4*4)
 			c.nextSeqNoMut.Lock()
-			handshakeData(data, c.nextSeqNo, uint32(c.packetSize), c.connID, c.remoteCookie, connectionTypeRequest)
+			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, c.remoteCookie}.marshal(data)
 			c.nextSeqNoMut.Unlock()
 			c.mux.out <- connPacket{
 				src: c.connID,
 				dst: c.dst,
-				hdr: &controlHeader{
+				hdr: header{
 					packetType: typeHandshake,
-					additional: 0,
+					flags:      flagsRequest,
 					connID:     0,
 				},
 				data: data,
 			}
+			atomic.AddUint64(&c.bytesOut, uint64(len(data)))
 			nextHandshake.Reset(handshakeInterval)
 		}
 	}
@@ -298,11 +306,13 @@ func (c *Conn) reader() {
 			c.mux.out <- connPacket{
 				src: c.connID,
 				dst: c.dst,
-				hdr: &controlHeader{
+				hdr: header{
 					packetType: typeShutdown,
 					connID:     c.remoteConnID,
 				},
 			}
+			atomic.AddUint64(&c.packetsOut, 1)
+			atomic.AddUint64(&c.bytesOut, udtHeaderLen)
 			return
 
 		case pkt := <-c.in:
@@ -310,55 +320,37 @@ func (c *Conn) reader() {
 				log.Println(c, "Read", pkt)
 			}
 
+			atomic.AddUint64(&c.packetsIn, 1)
+			atomic.AddUint64(&c.bytesIn, udtHeaderLen+uint64(len(pkt.data)))
+
 			c.expCount = 1
 			c.expReset = time.Now()
 			c.unackedMut.Lock()
-			if len(c.unacked) == 0 {
+			if len(c.sendLost) == 0 {
 				c.resetExp(defExpTime)
 			}
 			c.unackedMut.Unlock()
 
-			switch hdr := pkt.hdr.(type) {
-			case *controlHeader:
-				c.processControlPacket(hdr, pkt.data)
-
-			case *dataHeader:
-				c.processDataPacket(hdr, pkt.data)
+			switch pkt.hdr.packetType {
+			case typeData:
+				c.recvdData(pkt)
+			case typeHandshake:
+				c.recvdHandshake(pkt)
+			case typeKeepAlive:
+				c.recvdKeepAlive(pkt)
+			case typeACK:
+				c.recvdACK(pkt)
+			case typeShutdown:
+				c.recvdShutdown(pkt)
 			}
 
 		case <-c.exp.C:
-			if c.getState() != stateConnected {
-				continue
-			}
-
-			resent := false
-			c.unackedMut.Lock()
-			if len(c.unacked) > 0 {
-				resent = true
-				if debugConnection {
-					log.Println(c, "Resend", len(c.unacked))
-				}
-				for _, pkt := range c.unacked {
-					c.mux.out <- pkt
-				}
-				c.cc.Exp()
-				c.maxUnacked = c.cc.SendWindow()
-			}
-			c.unackedMut.Unlock()
-
-			c.expCount++
-			if resent && c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
-				c.Close()
-			}
+			c.eventEXP()
 			c.resetExp(time.Duration(c.expCount) * defExpTime)
 
 		case <-c.syn.C:
-			if c.getState() != stateConnected {
-				continue
-			}
-			if c.rcvdUnacked > 0 {
-				c.sendACK()
-			}
+			c.eventSYN()
+			c.resetSyn(defSynTime)
 
 		case n := <-c.debugResetRecvSeqNo:
 			// Back door for testing
@@ -368,52 +360,171 @@ func (c *Conn) reader() {
 	}
 }
 
-func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
-	switch hdr.packetType {
+func (c *Conn) writer() {
+	if debugConnection {
+		log.Println(c, "writer() starting")
+		defer log.Println(c, "writer() exiting")
+	}
+
+	for {
+		/*
+			                          sendBufferWindow
+			                         v
+				[S|S|S|S|Q|Q|Q|Q| | | | | | | | | ]
+				         ^       ^sendBufferWrite
+				          sendBufferSend
+		*/
+
+		c.unackedMut.Lock()
+		for c.sendLostSend < len(c.sendLost) {
+			pkt := c.sendLost[c.sendLostSend]
+			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			c.mux.out <- pkt
+			c.sendLostSend++
+			atomic.AddUint64(&c.resentPackets, 1)
+		}
+
+		for c.sendBufferSend < c.sendBufferWrite {
+			pkt := c.sendBuffer[c.sendBufferSend]
+			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			c.mux.out <- pkt
+			c.sendBufferSend++
+			atomic.AddUint64(&c.packetsOut, 1)
+			atomic.AddUint64(&c.bytesOut, udtHeaderLen+uint64(len(pkt.data)))
+		}
+
+		c.unackedCond.Broadcast()
+
+		for c.sendBufferSend == c.sendBufferWrite && c.sendLostSend == len(c.sendLost) {
+			if debugConnection {
+				log.Println(c, "writer() paused")
+			}
+			c.unackedCond.Wait()
+		}
+		c.unackedMut.Unlock()
+	}
+}
+
+func (c *Conn) eventEXP() {
+	if c.getState() != stateConnected {
+		return
+	}
+
+	resent := false
+	c.unackedMut.Lock()
+	if c.sendBufferSend > 0 {
+		// There are packets that have been sent but not acked. Move them from
+		// the send buffer to the loss list for retransmission.
+		resent = true
+		if debugConnection {
+			log.Println(c, "resend from buffer", c.sendBufferSend)
+		}
+
+		// Append the packets to the loss list
+		c.sendLost = append(c.sendLost, c.sendBuffer[:c.sendBufferSend]...)
+
+		// Rewind the send buffer
+		copy(c.sendBuffer, c.sendBuffer[c.sendBufferSend:])
+		c.sendBufferWrite -= c.sendBufferSend
+		c.sendBufferSend = 0
+		c.unackedCond.Broadcast()
+
+		c.cc.Exp()
+		c.adjustSendBuffer()
+	}
+
+	if c.sendLostSend > 0 {
+		// Also resend whatever was already in the loss list
+		resent = true
+		if debugConnection {
+			log.Println(c, "resend from loss list", c.sendLostSend)
+		}
+		c.sendLostSend = 0
+		c.unackedCond.Broadcast()
+	}
+
+	c.unackedMut.Unlock()
+
+	c.expCount++
+	if resent && c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
+		c.Close()
+	}
+}
+
+func (c *Conn) adjustSendBuffer() {
+	c.sendWindow = c.cc.SendWindow()
+	if c.sendWindow > len(c.sendBuffer) {
+		if c.sendWindow <= cap(c.sendBuffer) {
+			c.sendBuffer = c.sendBuffer[:c.sendWindow]
+		} else {
+			sb := make([]connPacket, c.sendWindow)
+			copy(sb, c.sendBuffer)
+			c.sendBuffer = sb
+		}
+		c.unackedCond.Broadcast()
+	}
+}
+
+func (c *Conn) eventSYN() {
+	if c.getState() != stateConnected {
+		return
+	}
+	if c.rcvdUnacked > 0 {
+		c.sendACK()
+	}
+}
+
+func (c *Conn) recvdHandshake(pkt connPacket) {
+	switch pkt.hdr.packetType {
 	case typeHandshake:
 		switch c.getState() {
 		case stateServerHandshake:
 			// We received an initial handshake from a client. Respond
 			// to it.
 
-			c.lastRecvSeqNo = binary.BigEndian.Uint32(data[8:])
-			c.lastAckedSeqNo = c.lastRecvSeqNo
-			packetSize := int(binary.BigEndian.Uint32(data[12:]))
-			if packetSize < c.packetSize {
-				c.packetSize = packetSize
-			}
-			c.remoteConnID = binary.BigEndian.Uint32(data[24:])
-			cookie := binary.BigEndian.Uint32(data[28:])
+			var hd handshakeData
+			hd.unmarshal(pkt.data)
 
-			data := make([]byte, (8*32+128)/8)
+			c.lastRecvSeqNo = hd.seqNo
+			c.lastAckedSeqNo = hd.seqNo
+			if int(hd.packetSize) < c.packetSize {
+				c.packetSize = int(hd.packetSize)
+			}
+			c.remoteConnID = hd.connID
+
+			data := make([]byte, 4*4)
 			c.nextSeqNoMut.Lock()
-			handshakeData(data, c.nextSeqNo, uint32(c.packetSize), c.connID, cookie, connectionTypeResponse)
+			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, hd.cookie}.marshal(data)
 			c.nextSeqNoMut.Unlock()
 			c.mux.out <- connPacket{
 				src: c.connID,
 				dst: c.dst,
-				hdr: &controlHeader{
+				hdr: header{
 					packetType: typeHandshake,
-					additional: 0,
+					flags:      flagsResponse,
 					connID:     c.remoteConnID,
 				},
 				data: data,
 			}
+			atomic.AddUint64(&c.packetsOut, 1)
+			atomic.AddUint64(&c.bytesOut, udtHeaderLen+uint64(len(data)))
 			c.setState(stateConnected)
 
 		case stateClientHandshake:
 			// We received a handshake response.
-			c.remoteConnID = binary.BigEndian.Uint32(data[24:])
-			if c.remoteConnID == 0 {
+			var hd handshakeData
+			hd.unmarshal(pkt.data)
+
+			if pkt.hdr.flags&flagsCookie != 0 {
 				// Not actually a response, but a cookie challenge.
-				cookie := binary.BigEndian.Uint32(data[28:])
 				cookieCacheMut.Lock()
-				cookieCache[c.dst.String()] = cookie
+				cookieCache[c.dst.String()] = hd.cookie
 				cookieCacheMut.Unlock()
-				c.remoteCookieUpdate <- cookie
+				c.remoteCookieUpdate <- hd.cookie
 			} else {
-				c.lastRecvSeqNo = binary.BigEndian.Uint32(data[8:])
-				c.packetSize = int(binary.BigEndian.Uint32(data[12:]))
+				c.remoteConnID = hd.connID
+				c.lastRecvSeqNo = hd.seqNo
+				c.packetSize = int(hd.packetSize)
 				c.lastAckedSeqNo = c.lastRecvSeqNo
 				c.setState(stateConnected)
 			}
@@ -422,49 +533,72 @@ func (c *Conn) processControlPacket(hdr *controlHeader, data []byte) {
 			log.Println("handshake packet in non handshake mode")
 			return
 		}
-
-	case typeACK:
-		ack := binary.BigEndian.Uint32(data)
-		c.unackedMut.Lock()
-
-		// Find the first packet that is still unacked, so we can cut
-		// the packets ahead of it in the list.
-
-		cut := 0
-		for i := range c.unacked {
-			if diff := c.unacked[i].hdr.(*dataHeader).sequenceNo - ack; diff < 1<<30 {
-				break
-			}
-			cut = i + 1
-		}
-
-		// If something is to be cut, do so and notify any writers
-		// that might be blocked.
-
-		if cut > 0 {
-			c.cc.Ack()
-			c.maxUnacked = c.cc.SendWindow()
-			c.unacked = c.unacked[cut:]
-			c.unackedCond.Broadcast()
-		}
-		c.unackedMut.Unlock()
-		c.resetExp(defExpTime)
-
-	case typeKeepAlive:
-		// do nothing
-
-	case typeShutdown:
-		c.Close()
 	}
 }
 
-func (c *Conn) processDataPacket(hdr *dataHeader, data []byte) {
-	atomic.AddUint64(&c.dataPacketsIn, 1)
-	expected := (c.lastRecvSeqNo + uint32(len(data))) & (1<<31 - 1)
-	if hdr.sequenceNo == expected {
+func (c *Conn) recvdACK(pkt connPacket) {
+	ack := pkt.hdr.extra
+	if debugConnection {
+		log.Printf("%v read ACK 0x%08x", c, ack)
+	}
+	c.unackedMut.Lock()
+
+	// Find the first packet that is still unacked, so we can cut
+	// the packets ahead of it in the list.
+
+	cut := 0
+	for i := range c.sendLost {
+		if diff := c.sendLost[i].hdr.sequenceNo - ack; diff < 1<<30 {
+			break
+		}
+		cut = i + 1
+	}
+	if cut > 0 {
+		c.sendLost = c.sendLost[cut:]
+		c.sendLostSend -= cut
+	}
+
+	cut = 0
+	for i := range c.sendBuffer {
+		if i >= c.sendBufferSend {
+			break
+		}
+		if diff := c.sendBuffer[i].hdr.sequenceNo - ack; diff < 1<<30 {
+			break
+		}
+		cut = i + 1
+	}
+
+	// If something is to be cut, do so and notify any writers
+	// that might be blocked.
+
+	if cut > 0 {
+		copy(c.sendBuffer, c.sendBuffer[cut:])
+		c.sendBufferSend -= cut
+		c.sendBufferWrite -= cut
+
+		c.cc.Ack()
+		c.adjustSendBuffer()
+
+		c.unackedCond.Broadcast()
+	}
+	c.unackedMut.Unlock()
+	c.resetExp(defExpTime)
+}
+
+func (c *Conn) recvdKeepAlive(pkt connPacket) {
+}
+
+func (c *Conn) recvdShutdown(pkt connPacket) {
+	c.Close()
+}
+
+func (c *Conn) recvdData(pkt connPacket) {
+	expected := c.lastRecvSeqNo
+	if pkt.hdr.sequenceNo == expected {
 		// An in-sequence packet.
 
-		c.lastRecvSeqNo = hdr.sequenceNo
+		c.lastRecvSeqNo = (pkt.hdr.sequenceNo + uint32(len(pkt.data))) & (1<<31 - 1)
 		c.rcvdUnacked++
 
 		if c.rcvdUnacked >= c.cc.AckPacketIntv() {
@@ -472,42 +606,42 @@ func (c *Conn) processDataPacket(hdr *dataHeader, data []byte) {
 		}
 
 		c.inbufMut.Lock()
-		c.inbuf = append(c.inbuf, data...)
+		c.inbuf = append(c.inbuf, pkt.data...)
 		c.inbufCond.Signal()
 		c.inbufMut.Unlock()
-		atomic.AddUint64(&c.dataBytesIn, uint64(len(data)))
-	} else if diff := hdr.sequenceNo - expected; diff > 1<<30 {
+	} else if diff := pkt.hdr.sequenceNo - expected; diff > 1<<30 {
 		if debugConnection {
-			log.Println(c, "old packet received; seq", hdr.sequenceNo, "expected", expected)
+			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, expected)
 		}
-		c.sendACK()
-	} else if debugConnection {
-		log.Println(c, "reordered; seq", hdr.sequenceNo, "expected", expected)
+		c.rcvdUnacked++
+		atomic.AddUint64(&c.droppedPackets, 1)
+	} else {
+		if debugConnection {
+			log.Printf("%v lost; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, expected)
+		}
+		atomic.AddUint64(&c.droppedPackets, 1)
 	}
 }
 
 func (c *Conn) sendACK() {
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint32(data[:], c.lastRecvSeqNo+1)
 	c.mux.out <- connPacket{
 		src: c.connID,
 		dst: c.dst,
-		hdr: &controlHeader{
+		hdr: header{
 			packetType: typeACK,
-			additional: 0,
 			connID:     c.remoteConnID,
+			extra:      c.lastRecvSeqNo,
 		},
-		data: data,
 	}
+	atomic.AddUint64(&c.packetsOut, 1)
+	atomic.AddUint64(&c.bytesOut, udtHeaderLen)
 	if debugConnection {
-		log.Println(c, "ACK", c.lastRecvSeqNo+1)
+		log.Printf("%v ACK 0x%08x", c, c.lastRecvSeqNo)
 	}
 
 	c.rcvdUnacked = 0
-	c.lastAckedSeqNo = c.lastRecvSeqNo + 1
+	c.lastAckedSeqNo = c.lastRecvSeqNo
 	c.lastAckedSeqNo &= uint32(1<<31 - 1)
-
-	c.resetSyn(defSynTime)
 }
 
 func (c *Conn) resetExp(d time.Duration) {
@@ -532,10 +666,10 @@ func (c *Conn) String() string {
 // after a fixed time limit; see SetDeadline and SetReadDeadline.
 func (c *Conn) Read(b []byte) (n int, err error) {
 	c.inbufMut.Lock()
-	defer c.inbufMut.Unlock()
 	for len(c.inbuf) == 0 {
 		select {
 		case <-c.closed:
+			c.inbufMut.Unlock()
 			return 0, io.EOF
 		default:
 		}
@@ -543,6 +677,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	}
 	n = copy(b, c.inbuf)
 	c.inbuf = c.inbuf[n:]
+	c.inbufMut.Unlock()
 	return n, nil
 }
 
@@ -568,26 +703,23 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		copy(sliceCopy, slice)
 
 		c.nextSeqNoMut.Lock()
-		c.nextSeqNo += uint32(len(slice))
-		c.nextSeqNo &= uint32(1<<31 - 1)
-		c.nextMsgNo++
-
 		pkt := connPacket{
 			src: c.connID,
 			dst: c.dst,
-			hdr: &dataHeader{
+			hdr: header{
+				packetType: typeData,
 				sequenceNo: c.nextSeqNo,
-				position:   positionOnly,
-				inOrder:    true,
-				messageNo:  c.nextMsgNo,
 				connID:     c.remoteConnID,
 			},
 			data: sliceCopy,
 		}
+		c.nextSeqNo += uint32(len(slice))
+		c.nextSeqNo &= uint32(1<<31 - 1)
+		c.nextMsgNo++
 		c.nextSeqNoMut.Unlock()
 
 		c.unackedMut.Lock()
-		for len(c.unacked) >= c.maxUnacked {
+		for c.sendBufferWrite == len(c.sendBuffer) || c.sendBufferWrite >= c.sendWindow {
 			if debugConnection {
 				log.Println(c, "Write blocked")
 			}
@@ -595,16 +727,16 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			// Connection may have closed while we were waiting
 			select {
 			case <-c.closed:
+				c.unackedMut.Unlock()
 				return sent, ErrClosed
 			default:
 			}
 		}
-		c.unacked = append(c.unacked, pkt)
+		c.sendBuffer[c.sendBufferWrite] = pkt
+		c.sendBufferWrite++
+		c.unackedCond.Broadcast()
 		c.unackedMut.Unlock()
 
-		c.mux.out <- pkt
-		atomic.AddUint64(&c.dataPacketsOut, 1)
-		atomic.AddUint64(&c.dataBytesOut, uint64(len(slice)))
 		sent += len(slice)
 		c.resetExp(defExpTime)
 	}
@@ -674,13 +806,17 @@ type Statistics struct {
 	DataPacketsOut uint64
 	DataBytesIn    uint64
 	DataBytesOut   uint64
+	ResentPackets  uint64
+	DroppedPackets uint64
 }
 
 func (c *Conn) GetStatistics() Statistics {
 	return Statistics{
-		DataPacketsIn:  atomic.LoadUint64(&c.dataPacketsIn),
-		DataPacketsOut: atomic.LoadUint64(&c.dataPacketsOut),
-		DataBytesIn:    atomic.LoadUint64(&c.dataBytesIn),
-		DataBytesOut:   atomic.LoadUint64(&c.dataBytesOut),
+		DataPacketsIn:  atomic.LoadUint64(&c.packetsIn),
+		DataPacketsOut: atomic.LoadUint64(&c.packetsOut),
+		DataBytesIn:    atomic.LoadUint64(&c.bytesIn),
+		DataBytesOut:   atomic.LoadUint64(&c.bytesOut),
+		ResentPackets:  atomic.LoadUint64(&c.resentPackets),
+		DroppedPackets: atomic.LoadUint64(&c.droppedPackets),
 	}
 }

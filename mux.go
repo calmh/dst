@@ -1,7 +1,6 @@
 package miniudt
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log"
 	"math/rand"
@@ -12,7 +11,7 @@ import (
 
 const (
 	maxIncomingRequests = 64
-	maxMessageSize      = 128 * 1024 //bytes
+	maxMessageSize      = 65536 //bytes
 )
 
 // Mux is a UDP multiplexer of UDT connections.
@@ -171,19 +170,38 @@ func (m *Mux) readerLoop() {
 			m.Close()
 			return
 		}
-		_ = from
-
 		buf = buf[:n]
-		hdr := unmarshalHeader(buf)
-		bufCopy := make([]byte, len(buf)-udtHeaderLen)
-		copy(bufCopy, buf[udtHeaderLen:])
 
-		if debugConnection {
-			log.Println(m, "Read", hdr)
+		var hdr header
+		hdr.unmarshal(buf)
+
+		var bufCopy []byte
+		if len(buf) > udtHeaderLen {
+			bufCopy = make([]byte, len(buf)-udtHeaderLen)
+			copy(bufCopy, buf[udtHeaderLen:])
 		}
 
-		switch hdr := hdr.(type) {
-		case *controlHeader:
+		if debugConnection {
+			log.Printf("%v Read %v", m, hdr)
+		}
+
+		switch hdr.packetType {
+		case typeData:
+			m.connsMut.Lock()
+			conn, ok := m.conns[hdr.connID]
+			m.connsMut.Unlock()
+
+			if ok {
+				conn.in <- connPacket{
+					dst:  nil,
+					hdr:  hdr,
+					data: bufCopy,
+				}
+			} else if debugConnection {
+				log.Printf("Data packet for unknown conn %08x", hdr.connID)
+			}
+
+		default:
 			if hdr.connID == 0 {
 				// This should be a handshake packet
 				if hdr.packetType != typeHandshake {
@@ -191,19 +209,24 @@ func (m *Mux) readerLoop() {
 					continue
 				}
 
-				clientConnID := binary.BigEndian.Uint32(bufCopy[24:])
-				rcvdCookie := binary.BigEndian.Uint32(bufCopy[28:])
+				var hd handshakeData
+				hd.unmarshal(buf[udtHeaderLen:])
+				if debugConnection {
+					log.Println(m, hd)
+				}
+
 				correctCookie := cookie(from)
-				if rcvdCookie != correctCookie {
+				if hd.cookie != correctCookie {
 					// Incorrect or missing SYN cookie. Send back a handshake
 					// with the expected one.
-					data := make([]byte, (8*32+128)/8)
-					handshakeData(data, 0, 0, 0, correctCookie, connectionTypeResponse)
+					data := make([]byte, 4*4)
+					handshakeData{cookie: correctCookie}.marshal(data)
 					m.out <- connPacket{
 						dst: from,
-						hdr: &controlHeader{
+						hdr: header{
 							packetType: typeHandshake,
-							connID:     clientConnID,
+							flags:      flagsCookie,
+							connID:     hd.connID,
 						},
 						data: data,
 					}
@@ -226,9 +249,16 @@ func (m *Mux) readerLoop() {
 				continue
 			}
 
+			if debugConnection && hdr.packetType == typeHandshake {
+				var hd handshakeData
+				hd.unmarshal(bufCopy)
+				log.Println(m, hd)
+			}
+
 			m.connsMut.Lock()
 			conn, ok := m.conns[hdr.connID]
 			m.connsMut.Unlock()
+
 			if ok {
 				conn.in <- connPacket{
 					dst:  nil,
@@ -239,19 +269,6 @@ func (m *Mux) readerLoop() {
 				log.Printf("Control packet %v for unknown conn %08x", hdr, hdr.connID)
 			}
 
-		case *dataHeader:
-			m.connsMut.Lock()
-			conn, ok := m.conns[hdr.connID]
-			m.connsMut.Unlock()
-			if ok {
-				conn.in <- connPacket{
-					dst:  nil,
-					hdr:  hdr,
-					data: bufCopy,
-				}
-			} else if debugConnection {
-				log.Printf("Data packet for unknown conn %08x", hdr.connID)
-			}
 		}
 	}
 }
@@ -261,17 +278,10 @@ func (m *Mux) String() string {
 }
 
 func (m *Mux) writerLoop() {
-	buf := make([]byte, 65536)
+	buf := make([]byte, maxMessageSize)
 	for sp := range m.out {
 		buf = buf[:udtHeaderLen+len(sp.data)]
-		switch hdr := sp.hdr.(type) {
-		case *dataHeader:
-			hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			hdr.marshal(buf)
-		case *controlHeader:
-			hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			hdr.marshal(buf)
-		}
+		sp.hdr.marshal(buf)
 		copy(buf[16:], sp.data)
 		if debugConnection {
 			log.Println(m, "Write", sp)
@@ -286,9 +296,9 @@ func (m *Mux) writerLoop() {
 func (m *Mux) newConn(c *Conn) uint32 {
 	// Find a unique connection ID
 	m.connsMut.Lock()
-	connID := uint32(rand.Int31())
+	connID := uint32(rand.Int31() & 0xffffff)
 	for _, ok := m.conns[connID]; ok; _, ok = m.conns[connID] {
-		connID = uint32(rand.Int31())
+		connID = uint32(rand.Int31() & 0xffffff)
 	}
 	m.conns[connID] = c
 	m.connsMut.Unlock()

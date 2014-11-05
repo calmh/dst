@@ -1,20 +1,25 @@
 package miniudt
 
 type WindowCC struct {
-	initialWindow int
+	minWindow     int
+	maxWindow     int
 	currentWindow int
 }
 
-func NewWindowCC(initial int) *WindowCC {
+func NewWindowCC() *WindowCC {
 	return &WindowCC{
-		initialWindow: initial,
-		currentWindow: initial,
+		minWindow:     16,
+		maxWindow:     4096,
+		currentWindow: 16,
 	}
 }
 
 func (w *WindowCC) Ack() {
-	if w.currentWindow < w.initialWindow*32 {
-		w.currentWindow += w.initialWindow
+	if w.currentWindow < w.maxWindow/2 {
+		w.currentWindow = w.currentWindow * 3 / 2
+	}
+	if w.currentWindow < w.maxWindow {
+		w.currentWindow += w.minWindow
 	}
 }
 

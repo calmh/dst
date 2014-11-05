@@ -9,30 +9,32 @@ import (
 
 var headerTests = []struct {
 	hex string
-	hdr interface{}
+	hdr header
 }{
 	{
 		"00000000 00000000 00000000 00000000",
-		&dataHeader{},
+		header{},
 	},
 	{
-		"12345678 A0008901 98765432 23457853",
-		&dataHeader{
-			sequenceNo: 0x12345678,
-			position:   positionFirst,
-			inOrder:    true,
-			messageNo:  0x8901,
+		"00123456 A0008901 98765432 23457853",
+		header{
+			packetType: typeData,
+			flags:      0,
+			connID:     0x123456,
+			sequenceNo: 0xA0008901,
 			timestamp:  0x98765432,
-			connID:     0x23457853,
+			extra:      0x23457853,
 		},
 	},
 	{
-		"92340000 22334455 55667788 99887766",
-		&controlHeader{
-			packetType: 0x1234,
-			additional: 0x22334455,
+		"34340000 22334455 55667788 99887766",
+		header{
+			packetType: typeACK,
+			flags:      flagsCookie,
+			connID:     0x340000,
+			sequenceNo: 0x22334455,
 			timestamp:  0x55667788,
-			connID:     0x99887766,
+			extra:      0x99887766,
 		},
 	},
 }
@@ -40,12 +42,7 @@ var headerTests = []struct {
 func TestEncodeHeaders(t *testing.T) {
 	for i, tc := range headerTests {
 		var actual [16]byte
-		switch h := tc.hdr.(type) {
-		case *dataHeader:
-			h.marshal(actual[:])
-		case *controlHeader:
-			h.marshal(actual[:])
-		}
+		tc.hdr.marshal(actual[:])
 		expected, _ := hex.DecodeString(strings.Replace(tc.hex, " ", "", -1))
 
 		if !reflect.DeepEqual(actual[:], expected) {
@@ -57,20 +54,11 @@ func TestEncodeHeaders(t *testing.T) {
 func TestDecodeHeaders(t *testing.T) {
 	for i, tc := range headerTests {
 		data, _ := hex.DecodeString(strings.Replace(tc.hex, " ", "", -1))
-		actual := unmarshalHeader(data)
+		var actual header
+		actual.unmarshal(data)
 
-		switch h := actual.(type) {
-		case *dataHeader:
-			if !reflect.DeepEqual(h, tc.hdr) {
-				t.Errorf("Decode %d incorrect;\n  A: %#v\n  E: %#v", i, h, tc.hdr)
-			}
-		case *controlHeader:
-			if !reflect.DeepEqual(h, tc.hdr) {
-				t.Errorf("Decode %d incorrect;\n  A: %#v\n  E: %#v", i, h, tc.hdr)
-			}
-		default:
-			t.Fatalf("Unknown type %T", h)
+		if !reflect.DeepEqual(actual, tc.hdr) {
+			t.Errorf("Decode %d incorrect;\n  A: %#v\n  E: %#v", i, actual, tc.hdr)
 		}
-
 	}
 }

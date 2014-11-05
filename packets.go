@@ -16,121 +16,93 @@ const (
 	positionOnly
 )
 
-type packetType uint16
+type packetType int8
 
 const (
-	typeHandshake packetType = 0x0
-	typeKeepAlive            = 0x1
-	typeACK                  = 0x2
-	//typeNAK                  = 0x3
-	typeShutdown = 0x5
-	//typeACK2                 = 0x6
-	//typeDrop                 = 0x7
-	//typeUser                 = 0x7fff
+	typeData      packetType = 0x0
+	typeHandshake            = 0x1
+	typeKeepAlive            = 0x2
+	typeACK                  = 0x3
+	typeNAK                  = 0x4
+	typeShutdown             = 0x5
 )
+
+func (t packetType) String() string {
+	switch t {
+	case typeData:
+		return "data"
+	case typeHandshake:
+		return "handshake"
+	case typeKeepAlive:
+		return "keepalive"
+	case typeACK:
+		return "ack"
+	case typeNAK:
+		return "nak"
+	case typeShutdown:
+		return "shutdown"
+	default:
+		return "uknown"
+	}
+}
 
 const (
-	connectionTypeRequest            = 1
-	connectionTypeResponse           = -1
-	connectionTypeRendezvous         = 0
-	connectionTypeRendezvousComplete = -2
+	flagsRequest  = 1 << 0
+	flagsResponse = 1 << 1
+	flagsCookie   = 1 << 2
 )
 
-type dataHeader struct {
+type header struct {
+	packetType packetType // 4 bits
+	flags      uint8      // 4 bits
+	connID     uint32
 	sequenceNo uint32
-	position   position
-	inOrder    bool
-	messageNo  uint32
 	timestamp  uint32
-	connID     uint32
+	extra      uint32
 }
 
-type header interface {
-	marshal(bs []byte)
-	String() string
-}
-
-const (
-	typeBit       = 1 << 31
-	ffoBits       = 1<<31 | 1<<30 | 1<<29
-	positionShift = 30
-	inOrderBit    = 1 << 29
-)
-
-func unmarshalHeader(bs []byte) header {
-	isControl := binary.BigEndian.Uint32(bs)&typeBit != 0
-	if isControl {
-		h := &controlHeader{}
-		h.unmarshal(bs)
-		return h
-	} else {
-		h := &dataHeader{}
-		h.unmarshal(bs)
-		return h
-	}
-}
-
-func (h *dataHeader) marshal(bs []byte) {
-	var f uint32 = h.messageNo &^ ffoBits
-	f |= uint32(h.position) << positionShift
-	if h.inOrder {
-		f |= inOrderBit
-	}
-
-	binary.BigEndian.PutUint32(bs[0:], h.sequenceNo&^typeBit)
-	binary.BigEndian.PutUint32(bs[4:], f)
+func (h header) marshal(bs []byte) {
+	binary.BigEndian.PutUint32(bs, uint32(h.connID&0xffffff))
+	bs[0] = h.flags | uint8(h.packetType)<<4
+	binary.BigEndian.PutUint32(bs[4:], h.sequenceNo)
 	binary.BigEndian.PutUint32(bs[8:], h.timestamp)
-	binary.BigEndian.PutUint32(bs[12:], h.connID)
+	binary.BigEndian.PutUint32(bs[12:], h.extra)
 }
 
-func (h *dataHeader) unmarshal(bs []byte) {
-	h.sequenceNo = binary.BigEndian.Uint32(bs[0:])
-	f := binary.BigEndian.Uint32(bs[4:])
-	h.position = position(f >> positionShift)
-	h.inOrder = f&inOrderBit != 0
-	h.messageNo = f &^ ffoBits
+func (h *header) unmarshal(bs []byte) {
+	h.packetType = packetType(bs[0] >> 4)
+	h.flags = bs[0] & 0xf
+	h.connID = binary.BigEndian.Uint32(bs) & 0xffffff
+	h.sequenceNo = binary.BigEndian.Uint32(bs[4:])
 	h.timestamp = binary.BigEndian.Uint32(bs[8:])
-	h.connID = binary.BigEndian.Uint32(bs[12:])
+	h.extra = binary.BigEndian.Uint32(bs[12:])
 }
 
-func (h *dataHeader) String() string {
-	return fmt.Sprintf("%#v", h)
+func (h header) String() string {
+	return fmt.Sprintf("header{type=%s flags=0x%x connID=0x%06x seq=0x%08x time=0x%08x extra=0x%08x}", h.packetType, h.flags, h.connID, h.sequenceNo, h.timestamp, h.extra)
 }
 
-type controlHeader struct {
-	packetType packetType
-	additional uint32
-	timestamp  uint32
+type handshakeData struct {
+	seqNo      uint32
+	packetSize uint32
 	connID     uint32
+	cookie     uint32
 }
 
-func (h *controlHeader) marshal(bs []byte) {
-	var f uint32 = uint32(h.packetType)<<16 | typeBit
-	binary.BigEndian.PutUint32(bs[0:], f)
-	binary.BigEndian.PutUint32(bs[4:], h.additional)
-	binary.BigEndian.PutUint32(bs[8:], h.timestamp)
-	binary.BigEndian.PutUint32(bs[12:], h.connID)
+func (h handshakeData) marshal(data []byte) {
+	binary.BigEndian.PutUint32(data[0:], h.seqNo)
+	binary.BigEndian.PutUint32(data[4:], h.packetSize)
+	binary.BigEndian.PutUint32(data[8:], h.connID)
+	binary.BigEndian.PutUint32(data[12:], h.cookie)
 }
 
-func (h *controlHeader) unmarshal(bs []byte) {
-	h.packetType = packetType(binary.BigEndian.Uint32(bs) &^ typeBit >> 16)
-	h.additional = binary.BigEndian.Uint32(bs[4:])
-	h.timestamp = binary.BigEndian.Uint32(bs[8:])
-	h.connID = binary.BigEndian.Uint32(bs[12:])
+func (h *handshakeData) unmarshal(data []byte) {
+	h.seqNo = binary.BigEndian.Uint32(data[0:])
+	h.packetSize = binary.BigEndian.Uint32(data[4:])
+	h.connID = binary.BigEndian.Uint32(data[8:])
+	h.cookie = binary.BigEndian.Uint32(data[12:])
 }
 
-func (h *controlHeader) String() string {
-	return fmt.Sprintf("%#v", h)
-}
-
-func handshakeData(data []byte, seqNo, packetSize, connID, cookie uint32, connType int32) {
-	binary.BigEndian.PutUint32(data[0:], 4)                 // UDT version
-	binary.BigEndian.PutUint32(data[4:], 0)                 // Socket Type (STREAM)
-	binary.BigEndian.PutUint32(data[8:], seqNo)             // Initial Sequence Number
-	binary.BigEndian.PutUint32(data[12:], packetSize)       // Packet Size
-	binary.BigEndian.PutUint32(data[16:], 0)                // Flow Window
-	binary.BigEndian.PutUint32(data[20:], uint32(connType)) // Connection Type
-	binary.BigEndian.PutUint32(data[24:], connID)           // Client Conn ID
-	binary.BigEndian.PutUint32(data[28:], cookie)           // Cookie
-	binary.BigEndian.PutUint32(data[32:], 0)                // Peer IP Address (TODO)
+func (h handshakeData) String() string {
+	return fmt.Sprintf("handshake{seq=0x%08x size=%d connID=0x%06x cookie=0x%08x", h.seqNo, h.packetSize, h.connID, h.cookie)
 }
