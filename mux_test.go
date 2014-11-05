@@ -1,10 +1,10 @@
-package miniudt_test
+package mdstp_test
 
 import (
 	"net"
 	"testing"
 
-	"github.com/calmh/miniudt"
+	"github.com/calmh/mdstp"
 )
 
 func TestMuxNew(t *testing.T) {
@@ -13,7 +13,7 @@ func TestMuxNew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := miniudt.NewMux(conn)
+	mp := mdstp.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -25,7 +25,7 @@ func TestMuxClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := miniudt.NewMux(conn)
+	mp := mdstp.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -36,7 +36,7 @@ func TestMuxClose(t *testing.T) {
 	}
 
 	err = mp.Close()
-	if err != miniudt.ErrCloseClosed {
+	if err != mdstp.ErrCloseClosed {
 		t.Error("Unexpected error", err)
 	}
 }
@@ -47,7 +47,7 @@ func TestMuxAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := miniudt.NewMux(conn)
+	mp := mdstp.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}

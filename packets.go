@@ -1,4 +1,4 @@
-package miniudt
+package mdstp
 
 import (
 	"encoding/binary"
@@ -7,7 +7,7 @@ import (
 
 type position uint8
 
-const udtHeaderLen = 16
+const mdstpHeaderLen = 16
 
 const (
 	positionMiddle position = iota

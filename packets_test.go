@@ -1,4 +1,4 @@
-package miniudt
+package mdstp
 
 import (
 	"encoding/hex"

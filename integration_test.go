@@ -1,6 +1,6 @@
 // +build integration
 
-package miniudt_test
+package mdstp_test
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/calmh/miniudt"
+	"github.com/calmh/mdstp"
 )
 
 func TestIntegrationMultipleConnections(t *testing.T) {
@@ -40,7 +40,7 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvMux := miniudt.NewMux(srvConn)
+	srvMux := mdstp.NewMux(srvConn)
 
 	go func() {
 		for {
@@ -57,7 +57,7 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientMux := miniudt.NewMux(clientConn)
+	clientMux := mdstp.NewMux(clientConn)
 
 	var wg sync.WaitGroup
 	t0 := time.Now()
@@ -67,7 +67,7 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 			defer wg.Done()
 			c := 0
 			for time.Since(t0) < 30*time.Second {
-				conn, err := clientMux.Dial("udt", srvMux.Addr().String())
+				conn, err := clientMux.Dial("mdstp", srvMux.Addr().String())
 				if err != nil {
 					errors <- err
 					return

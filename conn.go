@@ -1,4 +1,4 @@
-package miniudt
+package mdstp
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ const (
 	minTimeClose      = 15 * time.Second // if at least this long has passed
 	handshakeInterval = time.Second
 
-	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*udt*/
+	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*mdstp*/
 )
 
 func init() {
@@ -312,7 +312,7 @@ func (c *Conn) reader() {
 				},
 			}
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, udtHeaderLen)
+			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen)
 			return
 
 		case pkt := <-c.in:
@@ -321,7 +321,7 @@ func (c *Conn) reader() {
 			}
 
 			atomic.AddUint64(&c.packetsIn, 1)
-			atomic.AddUint64(&c.bytesIn, udtHeaderLen+uint64(len(pkt.data)))
+			atomic.AddUint64(&c.bytesIn, mdstpHeaderLen+uint64(len(pkt.data)))
 
 			c.expCount = 1
 			c.expReset = time.Now()
@@ -376,26 +376,24 @@ func (c *Conn) writer() {
 		*/
 
 		c.unackedMut.Lock()
-		for c.sendLostSend < len(c.sendLost) {
+		if c.sendLostSend < len(c.sendLost) {
 			pkt := c.sendLost[c.sendLostSend]
 			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
 			c.mux.out <- pkt
 			c.sendLostSend++
 			atomic.AddUint64(&c.resentPackets, 1)
-		}
-
-		for c.sendBufferSend < c.sendBufferWrite {
+		} else if c.sendBufferSend < c.sendBufferWrite {
 			pkt := c.sendBuffer[c.sendBufferSend]
 			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
 			c.mux.out <- pkt
 			c.sendBufferSend++
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, udtHeaderLen+uint64(len(pkt.data)))
+			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen+uint64(len(pkt.data)))
 		}
 
 		c.unackedCond.Broadcast()
 
-		for c.sendBufferSend == c.sendBufferWrite && c.sendLostSend == len(c.sendLost) {
+		for c.sendLostSend >= c.sendWindow || (c.sendBufferSend == c.sendBufferWrite && c.sendLostSend == len(c.sendLost)) {
 			if debugConnection {
 				log.Println(c, "writer() paused")
 			}
@@ -427,10 +425,6 @@ func (c *Conn) eventEXP() {
 		copy(c.sendBuffer, c.sendBuffer[c.sendBufferSend:])
 		c.sendBufferWrite -= c.sendBufferSend
 		c.sendBufferSend = 0
-		c.unackedCond.Broadcast()
-
-		c.cc.Exp()
-		c.adjustSendBuffer()
 	}
 
 	if c.sendLostSend > 0 {
@@ -440,6 +434,11 @@ func (c *Conn) eventEXP() {
 			log.Println(c, "resend from loss list", c.sendLostSend)
 		}
 		c.sendLostSend = 0
+	}
+
+	if resent {
+		c.cc.Exp()
+		c.adjustSendBuffer()
 		c.unackedCond.Broadcast()
 	}
 
@@ -507,7 +506,7 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 				data: data,
 			}
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, udtHeaderLen+uint64(len(data)))
+			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen+uint64(len(data)))
 			c.setState(stateConnected)
 
 		case stateClientHandshake:
@@ -543,11 +542,13 @@ func (c *Conn) recvdACK(pkt connPacket) {
 	}
 	c.unackedMut.Lock()
 
-	// Find the first packet that is still unacked, so we can cut
-	// the packets ahead of it in the list.
+	// Cut packets from the loss list if they have been acked
 
 	cut := 0
 	for i := range c.sendLost {
+		if i >= c.sendLostSend {
+			break
+		}
 		if diff := c.sendLost[i].hdr.sequenceNo - ack; diff < 1<<30 {
 			break
 		}
@@ -556,7 +557,11 @@ func (c *Conn) recvdACK(pkt connPacket) {
 	if cut > 0 {
 		c.sendLost = c.sendLost[cut:]
 		c.sendLostSend -= cut
+		c.unackedCond.Broadcast()
 	}
+
+	// Find the first packet that is still unacked, so we can cut
+	// the packets ahead of it in the list.
 
 	cut = 0
 	for i := range c.sendBuffer {
@@ -634,7 +639,7 @@ func (c *Conn) sendACK() {
 		},
 	}
 	atomic.AddUint64(&c.packetsOut, 1)
-	atomic.AddUint64(&c.bytesOut, udtHeaderLen)
+	atomic.AddUint64(&c.bytesOut, mdstpHeaderLen)
 	if debugConnection {
 		log.Printf("%v ACK 0x%08x", c, c.lastRecvSeqNo)
 	}

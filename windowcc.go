@@ -1,4 +1,4 @@
-package miniudt
+package mdstp
 
 type WindowCC struct {
 	minWindow     int
@@ -24,9 +24,7 @@ func (w *WindowCC) Ack() {
 }
 
 func (w *WindowCC) Exp() {
-	if w.currentWindow > 2 {
-		w.currentWindow /= 2
-	}
+	w.currentWindow = w.minWindow
 }
 
 func (w *WindowCC) SendWindow() int {

@@ -1,5 +1,5 @@
 // +build debug
 
-package miniudt
+package mdstp
 
 const debugConnection = true

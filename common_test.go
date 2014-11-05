@@ -1,4 +1,4 @@
-package miniudt
+package mdstp
 
 import (
 	mr "math/rand"
@@ -28,7 +28,7 @@ func connPair(aLoss, bLoss float64) (*Conn, *Conn, error) {
 		otherConn, otherErr = mpB.AcceptUDT()
 	}()
 
-	conn, err := mpA.DialUDT("udt", mpB.Addr().String())
+	conn, err := mpA.DialUDT("mdstp", mpB.Addr().String())
 	if err != nil {
 		return nil, nil, err
 	}

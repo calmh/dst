@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/calmh/miniudt"
+	"github.com/calmh/mdstp"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mux := miniudt.NewMux(sock)
+	mux := mdstp.NewMux(sock)
 	log.Println(mux.Addr())
 
 	go func() {
@@ -34,7 +34,7 @@ func main() {
 	}()
 
 	if flag.NArg() > 0 {
-		conn, err := mux.Dial("udt", flag.Arg(0))
+		conn, err := mux.Dial("mdstp", flag.Arg(0))
 		if err != nil {
 			log.Fatal(err)
 		}
