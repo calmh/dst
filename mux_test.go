@@ -1,10 +1,10 @@
-package mdstp_test
+package dst_test
 
 import (
 	"net"
 	"testing"
 
-	"github.com/calmh/mdstp"
+	"github.com/calmh/dst"
 )
 
 func TestMuxNew(t *testing.T) {
@@ -13,7 +13,7 @@ func TestMuxNew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := mdstp.NewMux(conn)
+	mp := dst.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -25,7 +25,7 @@ func TestMuxClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := mdstp.NewMux(conn)
+	mp := dst.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -36,7 +36,7 @@ func TestMuxClose(t *testing.T) {
 	}
 
 	err = mp.Close()
-	if err != mdstp.ErrCloseClosed {
+	if err != dst.ErrCloseClosed {
 		t.Error("Unexpected error", err)
 	}
 }
@@ -47,7 +47,7 @@ func TestMuxAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := mdstp.NewMux(conn)
+	mp := dst.NewMux(conn)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}

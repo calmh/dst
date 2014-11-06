@@ -1,8 +1,8 @@
 /*
 
-Package mdstp implements the Multiplexed Datagram Stream Transfer Protocol.
+Package dst implements the Datagram Stream Transfer protocol.
 
-MDSTP is a way to get reliable stream connections (like TCP) on top of UDP.
+DST is a way to get reliable stream connections (like TCP) on top of UDP.
 
 */
-package mdstp
+package dst

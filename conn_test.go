@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 import (
 	"bytes"
@@ -330,7 +330,7 @@ func TestPacketSize(t *testing.T) {
 		errors <- nil
 	}()
 
-	conn, err := muxB.Dial("mdstp", muxA.Addr().String())
+	conn, err := muxB.Dial("dst", muxA.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

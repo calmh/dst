@@ -1,5 +1,5 @@
 // +build debug
 
-package mdstp
+package dst
 
 const debugConnection = true

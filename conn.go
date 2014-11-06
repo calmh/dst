@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ const (
 	minTimeClose      = 15 * time.Second // if at least this long has passed
 	handshakeInterval = time.Second
 
-	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*mdstp*/
+	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
 
 func init() {
@@ -312,7 +312,7 @@ func (c *Conn) reader() {
 				},
 			}
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen)
+			atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 			return
 
 		case pkt := <-c.in:
@@ -321,7 +321,7 @@ func (c *Conn) reader() {
 			}
 
 			atomic.AddUint64(&c.packetsIn, 1)
-			atomic.AddUint64(&c.bytesIn, mdstpHeaderLen+uint64(len(pkt.data)))
+			atomic.AddUint64(&c.bytesIn, dstHeaderLen+uint64(len(pkt.data)))
 
 			c.expCount = 1
 			c.expReset = time.Now()
@@ -388,7 +388,7 @@ func (c *Conn) writer() {
 			c.mux.out <- pkt
 			c.sendBufferSend++
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen+uint64(len(pkt.data)))
+			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(pkt.data)))
 		}
 
 		c.unackedCond.Broadcast()
@@ -506,7 +506,7 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 				data: data,
 			}
 			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, mdstpHeaderLen+uint64(len(data)))
+			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(data)))
 			c.setState(stateConnected)
 
 		case stateClientHandshake:
@@ -639,7 +639,7 @@ func (c *Conn) sendACK() {
 		},
 	}
 	atomic.AddUint64(&c.packetsOut, 1)
-	atomic.AddUint64(&c.bytesOut, mdstpHeaderLen)
+	atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 	if debugConnection {
 		log.Printf("%v ACK 0x%08x", c, c.lastRecvSeqNo)
 	}

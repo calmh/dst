@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 type WindowCC struct {
 	minWindow     int

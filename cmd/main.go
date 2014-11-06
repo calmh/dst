@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/calmh/mdstp"
+	"github.com/calmh/dst"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mux := mdstp.NewMux(sock)
+	mux := dst.NewMux(sock)
 	log.Println(mux.Addr())
 
 	go func() {
@@ -34,7 +34,7 @@ func main() {
 	}()
 
 	if flag.NArg() > 0 {
-		conn, err := mux.Dial("mdstp", flag.Arg(0))
+		conn, err := mux.Dial("dst", flag.Arg(0))
 		if err != nil {
 			log.Fatal(err)
 		}

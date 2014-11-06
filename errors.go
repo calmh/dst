@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 type Error struct {
 	Err string
@@ -11,7 +11,7 @@ func (e Error) Error() string {
 var (
 	ErrCloseClosed      = &Error{"close on already closed mux"}
 	ErrAcceptClosed     = &Error{"accept on closed mux"}
-	ErrNotUDTNetwork    = &Error{"network is not mdstp"}
+	ErrNotUDTNetwork    = &Error{"network is not dst"}
 	ErrHandshakeTimeout = &Error{"handshake timeout"}
 	ErrClosed           = &Error{"operation on closed connection"}
 )

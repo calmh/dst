@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 import (
 	"fmt"
@@ -98,7 +98,7 @@ func (m *Mux) Addr() net.Addr {
 
 // Dial connects to the address on the named network.
 //
-// Network must be "mdstp".
+// Network must be "dst".
 //
 // Addresses have the form host:port. If host is a literal IPv6 address or
 // host name, it must be enclosed in square brackets as in "[::1]:80",
@@ -106,17 +106,17 @@ func (m *Mux) Addr() net.Addr {
 // SplitHostPort manipulate addresses in this form.
 //
 // Examples:
-//	Dial("mdstp", "12.34.56.78:80")
-//	Dial("mdstp", "google.com:http")
-//	Dial("mdstp", "[2001:db8::1]:http")
-//	Dial("mdstp", "[fe80::1%lo0]:80")
+//	Dial("dst", "12.34.56.78:80")
+//	Dial("dst", "google.com:http")
+//	Dial("dst", "[2001:db8::1]:http")
+//	Dial("dst", "[fe80::1%lo0]:80")
 func (m *Mux) Dial(network, addr string) (*Conn, error) {
 	return m.DialUDT(network, addr)
 }
 
 // Dial connects to the address on the named network.
 //
-// Network must be "mdstp".
+// Network must be "dst".
 //
 // Addresses have the form host:port. If host is a literal IPv6 address or
 // host name, it must be enclosed in square brackets as in "[::1]:80",
@@ -124,12 +124,12 @@ func (m *Mux) Dial(network, addr string) (*Conn, error) {
 // SplitHostPort manipulate addresses in this form.
 //
 // Examples:
-//	Dial("mdstp", "12.34.56.78:80")
-//	Dial("mdstp", "google.com:http")
-//	Dial("mdstp", "[2001:db8::1]:http")
-//	Dial("mdstp", "[fe80::1%lo0]:80")
+//	Dial("dst", "12.34.56.78:80")
+//	Dial("dst", "google.com:http")
+//	Dial("dst", "[2001:db8::1]:http")
+//	Dial("dst", "[fe80::1%lo0]:80")
 func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
-	if network != "mdstp" {
+	if network != "dst" {
 		return nil, ErrNotUDTNetwork
 	}
 
@@ -176,9 +176,9 @@ func (m *Mux) readerLoop() {
 		hdr.unmarshal(buf)
 
 		var bufCopy []byte
-		if len(buf) > mdstpHeaderLen {
-			bufCopy = make([]byte, len(buf)-mdstpHeaderLen)
-			copy(bufCopy, buf[mdstpHeaderLen:])
+		if len(buf) > dstHeaderLen {
+			bufCopy = make([]byte, len(buf)-dstHeaderLen)
+			copy(bufCopy, buf[dstHeaderLen:])
 		}
 
 		if debugConnection {
@@ -210,7 +210,7 @@ func (m *Mux) readerLoop() {
 				}
 
 				var hd handshakeData
-				hd.unmarshal(buf[mdstpHeaderLen:])
+				hd.unmarshal(buf[dstHeaderLen:])
 				if debugConnection {
 					log.Println(m, hd)
 				}
@@ -280,7 +280,7 @@ func (m *Mux) String() string {
 func (m *Mux) writerLoop() {
 	buf := make([]byte, maxMessageSize)
 	for sp := range m.out {
-		buf = buf[:mdstpHeaderLen+len(sp.data)]
+		buf = buf[:dstHeaderLen+len(sp.data)]
 		sp.hdr.marshal(buf)
 		copy(buf[16:], sp.data)
 		if debugConnection {

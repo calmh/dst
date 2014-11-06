@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 import (
 	"encoding/hex"

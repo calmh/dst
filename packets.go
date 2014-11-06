@@ -1,4 +1,4 @@
-package mdstp
+package dst
 
 import (
 	"encoding/binary"
@@ -7,7 +7,7 @@ import (
 
 type position uint8
 
-const mdstpHeaderLen = 16
+const dstHeaderLen = 16
 
 const (
 	positionMiddle position = iota
