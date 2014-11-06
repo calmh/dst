@@ -41,6 +41,36 @@ func connPair(aLoss, bLoss float64) (*Conn, *Conn, error) {
 	return conn, otherConn, nil
 }
 
+func tcpConnPair() (net.Conn, net.Conn, error) {
+	mpA, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Dial
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var otherErr error
+	var otherConn net.Conn
+	go func() {
+		defer wg.Done()
+		otherConn, otherErr = mpA.Accept()
+	}()
+
+	conn, err := net.Dial("tcp", mpA.Addr().String())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	wg.Wait()
+	if otherErr != nil {
+		return nil, nil, otherErr
+	}
+
+	return conn, otherConn, nil
+}
+
 func newLossyMux(loss float64) (*Mux, error) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {

@@ -75,4 +75,6 @@ func test(conn net.Conn) {
 	log.Printf("%v send %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
 
 	conn.Close()
+
+	log.Println(conn.(*dst.Conn).GetStatistics())
 }

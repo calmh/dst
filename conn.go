@@ -40,7 +40,7 @@ type CongestionController interface {
 	AckPacketIntv() int
 }
 
-// Conn is a UDT connection carried over a Mux.
+// Conn is an SDT connection carried over a Mux.
 type Conn struct {
 	// Set at creation, thereafter immutable:
 
@@ -82,6 +82,11 @@ type Conn struct {
 
 	packetSize int
 
+	ackSent     []ackTimestamp // timestamps of the last transmitted ACKs
+	nextAckSent int            // index to write next timestamp at
+	avgRtt      int64          // microseconds
+	rttMut      sync.Mutex
+
 	// Only touched by the reader routine, needs no locking
 
 	rcvdUnacked int
@@ -110,6 +115,11 @@ type Conn struct {
 	bytesOut       uint64
 	resentPackets  uint64
 	droppedPackets uint64
+}
+
+type ackTimestamp struct {
+	sequenceNo uint32
+	time       int64
 }
 
 type connPacket struct {
@@ -176,6 +186,8 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn.remoteCookieUpdate = make(chan uint32)
 	conn.debugResetRecvSeqNo = make(chan uint32)
 	conn.expReset = time.Now()
+
+	conn.ackSent = make([]ackTimestamp, 5)
 
 	if conn.cc == nil {
 		conn.cc = NewWindowCC()
@@ -327,7 +339,7 @@ func (c *Conn) reader() {
 			c.expReset = time.Now()
 			c.unackedMut.Lock()
 			if len(c.sendLost) == 0 {
-				c.resetExp(defExpTime)
+				c.resetExp()
 			}
 			c.unackedMut.Unlock()
 
@@ -340,13 +352,15 @@ func (c *Conn) reader() {
 				c.recvdKeepAlive(pkt)
 			case typeACK:
 				c.recvdACK(pkt)
+			case typeACK2:
+				c.recvdACK2(pkt)
 			case typeShutdown:
 				c.recvdShutdown(pkt)
 			}
 
 		case <-c.exp.C:
 			c.eventEXP()
-			c.resetExp(time.Duration(c.expCount) * defExpTime)
+			c.resetExp()
 
 		case <-c.syn.C:
 			c.eventSYN()
@@ -537,6 +551,17 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 
 func (c *Conn) recvdACK(pkt connPacket) {
 	ack := pkt.hdr.extra
+
+	c.mux.out <- connPacket{
+		src: c.connID,
+		dst: c.dst,
+		hdr: header{
+			packetType: typeACK2,
+			connID:     c.remoteConnID,
+			extra:      ack,
+		},
+	}
+
 	if debugConnection {
 		log.Printf("%v read ACK 0x%08x", c, ack)
 	}
@@ -588,7 +613,22 @@ func (c *Conn) recvdACK(pkt connPacket) {
 		c.unackedCond.Broadcast()
 	}
 	c.unackedMut.Unlock()
-	c.resetExp(defExpTime)
+	c.resetExp()
+}
+
+func (c *Conn) recvdACK2(pkt connPacket) {
+	ack := pkt.hdr.extra
+	now := time.Now().UnixNano() / 1000
+
+	c.rttMut.Lock()
+	for _, ts := range c.ackSent {
+		if ts.sequenceNo == ack {
+			diff := now - ts.time
+			c.avgRtt = (c.avgRtt/8)*7 + diff
+			break
+		}
+	}
+	c.rttMut.Unlock()
 }
 
 func (c *Conn) recvdKeepAlive(pkt connPacket) {
@@ -629,6 +669,7 @@ func (c *Conn) recvdData(pkt connPacket) {
 }
 
 func (c *Conn) sendACK() {
+	now := time.Now().UnixNano() / 1000
 	c.mux.out <- connPacket{
 		src: c.connID,
 		dst: c.dst,
@@ -638,6 +679,15 @@ func (c *Conn) sendACK() {
 			extra:      c.lastRecvSeqNo,
 		},
 	}
+
+	c.rttMut.Lock()
+	c.ackSent[c.nextAckSent] = ackTimestamp{
+		sequenceNo: c.lastRecvSeqNo,
+		time:       now,
+	}
+	c.nextAckSent = (c.nextAckSent + 1) % len(c.ackSent)
+	c.rttMut.Unlock()
+
 	atomic.AddUint64(&c.packetsOut, 1)
 	atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 	if debugConnection {
@@ -649,7 +699,15 @@ func (c *Conn) sendACK() {
 	c.lastAckedSeqNo &= uint32(1<<31 - 1)
 }
 
-func (c *Conn) resetExp(d time.Duration) {
+func (c *Conn) resetExp() {
+	c.rttMut.Lock()
+	d := time.Duration(c.avgRtt*4)*1000 + defSynTime
+	c.rttMut.Unlock()
+
+	if d < defExpTime {
+		d = defExpTime
+	}
+
 	c.expMut.Lock()
 	c.exp.Reset(d)
 	c.expMut.Unlock()
@@ -743,7 +801,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.unackedMut.Unlock()
 
 		sent += len(slice)
-		c.resetExp(defExpTime)
+		c.resetExp()
 	}
 	return sent, nil
 }

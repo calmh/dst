@@ -23,8 +23,9 @@ const (
 	typeHandshake            = 0x1
 	typeKeepAlive            = 0x2
 	typeACK                  = 0x3
-	typeNAK                  = 0x4
-	typeShutdown             = 0x5
+	typeACK2                 = 0x4
+	typeNAK                  = 0x5
+	typeShutdown             = 0x6
 )
 
 func (t packetType) String() string {

@@ -54,3 +54,35 @@ func benchmarkWithLoss(b *testing.B, loss float64) {
 	log.Println("stats", aConn.GetStatistics(), bConn.GetStatistics())
 	b.SetBytes(65536)
 }
+
+func BenchmarkTCPNoLoss(b *testing.B) {
+	aConn, bConn, err := tcpConnPair()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	src := make([]byte, 65536)
+	io.ReadFull(rand.Reader, src)
+
+	go func() {
+		for i := 0; i < b.N; i++ {
+			_, err := aConn.Write(src)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}()
+
+	b.ResetTimer()
+
+	buf := make([]byte, 65536)
+	for i := 0; i < b.N; i++ {
+		_, err := io.ReadFull(bConn, buf)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.SetBytes(65536)
+}
+
