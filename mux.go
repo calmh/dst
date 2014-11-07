@@ -24,7 +24,6 @@ type Mux struct {
 	incoming  chan *Conn
 	closed    chan struct{}
 	closeOnce sync.Once
-	out       chan connPacket
 
 	packetSize    int
 	packetSizeMut sync.Mutex
@@ -39,7 +38,6 @@ func NewMux(conn net.PacketConn) *Mux {
 		conns:      map[uint32]*Conn{},
 		incoming:   make(chan *Conn, maxIncomingRequests),
 		closed:     make(chan struct{}),
-		out:        make(chan connPacket, 8192),
 		packetSize: maxPacketSize,
 		buffers: &sync.Pool{
 			New: func() interface{} {
@@ -67,7 +65,6 @@ func NewMux(conn net.PacketConn) *Mux {
 	}
 
 	go m.readerLoop()
-	go m.writerLoop()
 
 	return m
 }
@@ -228,7 +225,7 @@ func (m *Mux) readerLoop() {
 					// with the expected one.
 					data := make([]byte, 4*4)
 					handshakeData{cookie: correctCookie}.marshal(data)
-					m.out <- connPacket{
+					m.write(connPacket{
 						dst: from,
 						hdr: header{
 							packetType: typeHandshake,
@@ -236,7 +233,7 @@ func (m *Mux) readerLoop() {
 							connID:     hd.connID,
 						},
 						data: data,
-					}
+					})
 					continue
 				}
 
@@ -280,24 +277,21 @@ func (m *Mux) readerLoop() {
 	}
 }
 
-func (m *Mux) String() string {
-	return fmt.Sprintf("Mux-%v", m.Addr())
+func (m *Mux) write(pkt connPacket) (int, error) {
+	buf := m.buffers.Get().([]byte)
+	buf = buf[:dstHeaderLen+len(pkt.data)]
+	pkt.hdr.marshal(buf)
+	copy(buf[16:], pkt.data)
+	if debugConnection {
+		log.Println(m, "write", pkt)
+	}
+	n, err := m.conn.WriteTo(buf, pkt.dst)
+	m.buffers.Put(buf)
+	return n, err
 }
 
-func (m *Mux) writerLoop() {
-	buf := make([]byte, maxPacketSize)
-	for sp := range m.out {
-		buf = buf[:dstHeaderLen+len(sp.data)]
-		sp.hdr.marshal(buf)
-		copy(buf[16:], sp.data)
-		if debugConnection {
-			log.Println(m, "Write", sp)
-		}
-		_, err := m.conn.WriteTo(buf, sp.dst)
-		if err != nil {
-			panic(err)
-		}
-	}
+func (m *Mux) String() string {
+	return fmt.Sprintf("Mux-%v", m.Addr())
 }
 
 func (m *Mux) newConn(c *Conn) uint32 {

@@ -1,7 +1,6 @@
 package dst
 
 import (
-	"code.google.com/p/curvecp/ringbuf"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"code.google.com/p/curvecp/ringbuf"
 )
 
 const (
@@ -286,7 +287,7 @@ func (c *Conn) handshake(timeout time.Duration) error {
 			c.nextSeqNoMut.Lock()
 			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, c.remoteCookie}.marshal(data)
 			c.nextSeqNoMut.Unlock()
-			c.mux.out <- connPacket{
+			c.mux.write(connPacket{
 				src: c.connID,
 				dst: c.dst,
 				hdr: header{
@@ -295,7 +296,7 @@ func (c *Conn) handshake(timeout time.Duration) error {
 					connID:     0,
 				},
 				data: data,
-			}
+			})
 			atomic.AddUint64(&c.bytesOut, uint64(len(data)))
 			nextHandshake.Reset(handshakeInterval)
 		}
@@ -316,14 +317,14 @@ func (c *Conn) reader() {
 				c.sendACK()
 			}
 			// Send a shutdown message.
-			c.mux.out <- connPacket{
+			c.mux.write(connPacket{
 				src: c.connID,
 				dst: c.dst,
 				hdr: header{
 					packetType: typeShutdown,
 					connID:     c.remoteConnID,
 				},
-			}
+			})
 			atomic.AddUint64(&c.packetsOut, 1)
 			atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 			return
@@ -420,7 +421,7 @@ func (c *Conn) writer() {
 		c.unackedMut.Unlock()
 
 		if pkt.dst != nil {
-			c.mux.out <- pkt
+			c.mux.write(pkt)
 		}
 	}
 }
@@ -517,7 +518,7 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 			c.nextSeqNoMut.Lock()
 			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, hd.cookie}.marshal(data)
 			c.nextSeqNoMut.Unlock()
-			c.mux.out <- connPacket{
+			c.mux.write(connPacket{
 				src: c.connID,
 				dst: c.dst,
 				hdr: header{
@@ -526,7 +527,7 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 					connID:     c.remoteConnID,
 				},
 				data: data,
-			}
+			})
 			atomic.AddUint64(&c.packetsOut, 1)
 			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(data)))
 			c.setState(stateConnected)
@@ -560,7 +561,7 @@ func (c *Conn) recvdHandshake(pkt connPacket) {
 func (c *Conn) recvdACK(pkt connPacket) {
 	ack := pkt.hdr.extra
 
-	c.mux.out <- connPacket{
+	c.mux.write(connPacket{
 		src: c.connID,
 		dst: c.dst,
 		hdr: header{
@@ -568,7 +569,7 @@ func (c *Conn) recvdACK(pkt connPacket) {
 			connID:     c.remoteConnID,
 			extra:      ack,
 		},
-	}
+	})
 
 	if debugConnection {
 		log.Printf("%v read ACK 0x%08x", c, ack)
@@ -694,7 +695,7 @@ func (c *Conn) recvdData(pkt connPacket) {
 
 func (c *Conn) sendACK() {
 	now := time.Now().UnixNano() / 1000
-	c.mux.out <- connPacket{
+	c.mux.write(connPacket{
 		src: c.connID,
 		dst: c.dst,
 		hdr: header{
@@ -702,7 +703,7 @@ func (c *Conn) sendACK() {
 			connID:     c.remoteConnID,
 			extra:      c.lastRecvSeqNo,
 		},
-	}
+	})
 
 	c.rttMut.Lock()
 	c.ackSent[c.nextAckSent] = ackTimestamp{

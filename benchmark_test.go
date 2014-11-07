@@ -3,22 +3,23 @@ package dst
 import (
 	"crypto/rand"
 	"io"
+	"net"
 	"testing"
 )
 
-func BenchmarkSendNoLoss(b *testing.B) {
+func BenchmarkDST(b *testing.B) {
 	benchmarkWithLoss(b, 0)
 }
 
-func BenchmarkSend0p0001Loss(b *testing.B) {
+func Benchmark0p0001Loss(b *testing.B) {
 	benchmarkWithLoss(b, 0.0001)
 }
 
-func BenchmarkSend0p001Loss(b *testing.B) {
+func Benchmark0p001Loss(b *testing.B) {
 	benchmarkWithLoss(b, 0.001)
 }
 
-func BenchmarkSend0p01Loss(b *testing.B) {
+func Benchmark0p01Loss(b *testing.B) {
 	benchmarkWithLoss(b, 0.01)
 }
 
@@ -53,7 +54,7 @@ func benchmarkWithLoss(b *testing.B, loss float64) {
 	b.SetBytes(65536)
 }
 
-func BenchmarkTCPNoLoss(b *testing.B) {
+func BenchmarkTCP(b *testing.B) {
 	aConn, bConn, err := tcpConnPair()
 	if err != nil {
 		b.Fatal(err)
@@ -82,4 +83,45 @@ func BenchmarkTCPNoLoss(b *testing.B) {
 	}
 
 	b.SetBytes(65536)
+}
+func BenchmarkUDP(b *testing.B) {
+	aConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	aConn.SetWriteBuffer(4096 * 1024)
+
+	bConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	bConn.SetReadBuffer(4096 * 1024)
+	bAddr := bConn.LocalAddr()
+
+	src := make([]byte, 1472)
+	io.ReadFull(rand.Reader, src)
+
+	go func(n int) {
+		for i := 0; i < n; i++ {
+			_, err := aConn.WriteTo(src, bAddr)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}(b.N)
+
+	b.ResetTimer()
+
+	buf := make([]byte, 1472)
+	for i := 0; i < b.N; i++ {
+		n, err := bConn.Read(buf)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if n != 1472 {
+			b.Fatalf("%d != 1472", n)
+		}
+	}
+
+	b.SetBytes(1024)
 }
