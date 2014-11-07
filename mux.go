@@ -39,7 +39,7 @@ func NewMux(conn net.PacketConn) *Mux {
 		conns:      map[uint32]*Conn{},
 		incoming:   make(chan *Conn, maxIncomingRequests),
 		closed:     make(chan struct{}),
-		out:        make(chan connPacket),
+		out:        make(chan connPacket, 8192),
 		packetSize: maxPacketSize,
 		buffers: &sync.Pool{
 			New: func() interface{} {

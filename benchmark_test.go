@@ -3,7 +3,6 @@ package dst
 import (
 	"crypto/rand"
 	"io"
-	"log"
 	"testing"
 )
 
@@ -51,7 +50,6 @@ func benchmarkWithLoss(b *testing.B, loss float64) {
 		}
 	}
 
-	log.Println("stats", aConn.GetStatistics(), bConn.GetStatistics())
 	b.SetBytes(65536)
 }
 

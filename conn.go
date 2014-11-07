@@ -15,7 +15,6 @@ import (
 const (
 	defExpTime        = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
 	defSynTime        = 10 * time.Millisecond
-	maxUnackedPkts    = 16
 	expCountClose     = 16               // close connection after this many EXPs
 	minTimeClose      = 15 * time.Second // if at least this long has passed
 	handshakeInterval = time.Second
@@ -395,31 +394,34 @@ func (c *Conn) writer() {
 				          sendBufferSend
 		*/
 
+		var pkt connPacket
 		c.unackedMut.Lock()
-		if c.sendLostSend < len(c.sendLost) {
-			pkt := c.sendLost[c.sendLostSend]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			c.mux.out <- pkt
-			c.sendLostSend++
-			atomic.AddUint64(&c.resentPackets, 1)
-		} else if c.sendBufferSend < c.sendBufferWrite {
-			pkt := c.sendBuffer[c.sendBufferSend]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			c.mux.out <- pkt
-			c.sendBufferSend++
-			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(pkt.data)))
-		}
-
-		c.unackedCond.Broadcast()
-
 		for c.sendLostSend >= c.sendWindow || (c.sendBufferSend == c.sendBufferWrite && c.sendLostSend == len(c.sendLost)) {
 			if debugConnection {
 				log.Println(c, "writer() paused")
 			}
 			c.unackedCond.Wait()
 		}
+
+		if c.sendLostSend < len(c.sendLost) {
+			pkt = c.sendLost[c.sendLostSend]
+			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			c.sendLostSend++
+			atomic.AddUint64(&c.resentPackets, 1)
+		} else if c.sendBufferSend < c.sendBufferWrite {
+			pkt = c.sendBuffer[c.sendBufferSend]
+			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			c.sendBufferSend++
+			atomic.AddUint64(&c.packetsOut, 1)
+			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(pkt.data)))
+		}
+
+		c.unackedCond.Broadcast()
 		c.unackedMut.Unlock()
+
+		if pkt.dst != nil {
+			c.mux.out <- pkt
+		}
 	}
 }
 
