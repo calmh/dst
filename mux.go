@@ -11,7 +11,7 @@ import (
 
 const (
 	maxIncomingRequests = 64
-	maxMessageSize      = 65536 //bytes
+	maxPacketSize       = 1500
 )
 
 // Mux is a UDP multiplexer of UDT connections.
@@ -28,6 +28,8 @@ type Mux struct {
 
 	packetSize    int
 	packetSizeMut sync.Mutex
+
+	buffers *sync.Pool
 }
 
 // NewMux creates a new UDT Mux on top of a packet connection.
@@ -38,7 +40,12 @@ func NewMux(conn net.PacketConn) *Mux {
 		incoming:   make(chan *Conn, maxIncomingRequests),
 		closed:     make(chan struct{}),
 		out:        make(chan connPacket),
-		packetSize: 1500,
+		packetSize: maxPacketSize,
+		buffers: &sync.Pool{
+			New: func() interface{} {
+				return make([]byte, maxPacketSize)
+			},
+		},
 	}
 
 	// Attempt to maximize buffer space. Start at 16 MB and work downwards 0.5
@@ -162,7 +169,7 @@ func (m *Mux) SetPacketSize(size int) {
 }
 
 func (m *Mux) readerLoop() {
-	buf := make([]byte, maxMessageSize)
+	buf := make([]byte, maxPacketSize)
 	for {
 		buf = buf[:cap(buf)]
 		n, from, err := m.conn.ReadFrom(buf)
@@ -177,7 +184,7 @@ func (m *Mux) readerLoop() {
 
 		var bufCopy []byte
 		if len(buf) > dstHeaderLen {
-			bufCopy = make([]byte, len(buf)-dstHeaderLen)
+			bufCopy = m.buffers.Get().([]byte)[:len(buf)-dstHeaderLen]
 			copy(bufCopy, buf[dstHeaderLen:])
 		}
 
@@ -278,7 +285,7 @@ func (m *Mux) String() string {
 }
 
 func (m *Mux) writerLoop() {
-	buf := make([]byte, maxMessageSize)
+	buf := make([]byte, maxPacketSize)
 	for sp := range m.out {
 		buf = buf[:dstHeaderLen+len(sp.data)]
 		sp.hdr.marshal(buf)

@@ -360,6 +360,10 @@ func (c *Conn) reader() {
 				c.recvdShutdown(pkt)
 			}
 
+			if len(pkt.data) > 0 {
+				c.mux.buffers.Put(pkt.data)
+			}
+
 		case <-c.exp.C:
 			c.eventEXP()
 			c.resetExp()
@@ -582,6 +586,9 @@ func (c *Conn) recvdACK(pkt connPacket) {
 		cut = i + 1
 	}
 	if cut > 0 {
+		for _, pkt := range c.sendLost[:cut] {
+			c.mux.buffers.Put(pkt.data)
+		}
 		c.sendLost = c.sendLost[cut:]
 		c.sendLostSend -= cut
 		c.unackedCond.Broadcast()
@@ -605,6 +612,10 @@ func (c *Conn) recvdACK(pkt connPacket) {
 	// that might be blocked.
 
 	if cut > 0 {
+		for _, pkt := range c.sendBuffer[:cut] {
+			c.mux.buffers.Put(pkt.data)
+		}
+
 		copy(c.sendBuffer, c.sendBuffer[cut:])
 		c.sendBufferSend -= cut
 		c.sendBufferWrite -= cut
@@ -770,7 +781,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			nxt = len(b)
 		}
 		slice := b[i:nxt]
-		sliceCopy := make([]byte, len(slice))
+		sliceCopy := c.mux.buffers.Get().([]byte)[:len(slice)]
 		copy(sliceCopy, slice)
 
 		c.nextSeqNoMut.Lock()
