@@ -3,8 +3,10 @@ package dst
 import (
 	"crypto/rand"
 	"io"
+	"log"
 	"net"
 	"testing"
+	"time"
 )
 
 func BenchmarkDST(b *testing.B) {
@@ -114,9 +116,14 @@ func BenchmarkUDP(b *testing.B) {
 	b.ResetTimer()
 
 	buf := make([]byte, 1472)
+
 	for i := 0; i < b.N; i++ {
+		if i%1000 == 0 {
+			aConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		}
 		n, err := aConn.Read(buf)
 		if err != nil {
+			log.Printf("Received %d packets out of %d; %.1f%% loss", i, b.N, 100-float64(i*100)/float64(b.N))
 			b.Fatal(err)
 		}
 		if n != 1472 {
