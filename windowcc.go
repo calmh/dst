@@ -8,7 +8,7 @@ type WindowCC struct {
 
 func NewWindowCC() *WindowCC {
 	return &WindowCC{
-		minWindow:     16,
+		minWindow:     8,
 		maxWindow:     4096,
 		currentWindow: 16,
 	}
@@ -33,4 +33,8 @@ func (w *WindowCC) SendWindow() int {
 
 func (w *WindowCC) AckPacketIntv() int {
 	return 1e6
+}
+
+func (w *WindowCC) PacketRate() int {
+	return 40 * w.currentWindow
 }

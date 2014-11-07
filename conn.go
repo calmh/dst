@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/juju/ratelimit"
+
 	"code.google.com/p/curvecp/ringbuf"
 )
 
@@ -39,6 +41,7 @@ type CongestionController interface {
 	Exp()
 	SendWindow() int
 	AckPacketIntv() int
+	PacketRate() int
 }
 
 // Conn is an SDT connection carried over a Mux.
@@ -68,6 +71,7 @@ type Conn struct {
 	sendLost        []connPacket
 	sendLostSend    int
 	sendWindow      int
+	packetRate      int // target pps
 	unackedMut      sync.Mutex
 	unackedCond     *sync.Cond
 
@@ -104,6 +108,8 @@ type Conn struct {
 	remoteCookieUpdate chan uint32
 
 	// Special
+
+	writeScheduler *ratelimit.Bucket
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -163,13 +169,14 @@ func (s connState) String() string {
 
 func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn := &Conn{
-		mux:        m,
-		dst:        dst,
-		nextSeqNo:  uint32(rand.Int31()),
-		packetSize: size,
-		in:         make(chan connPacket, 1024),
-		closed:     make(chan struct{}),
-		cc:         cc,
+		mux:            m,
+		dst:            dst,
+		nextSeqNo:      uint32(rand.Int31()),
+		packetSize:     size,
+		in:             make(chan connPacket, 1024),
+		closed:         make(chan struct{}),
+		cc:             cc,
+		writeScheduler: ratelimit.NewBucketWithRate(1000000, 25000),
 	}
 
 	cookieCacheMut.Lock()
@@ -418,9 +425,11 @@ func (c *Conn) writer() {
 		}
 
 		c.unackedCond.Broadcast()
+		packetRate := c.packetRate
 		c.unackedMut.Unlock()
 
 		if pkt.dst != nil {
+			c.writeScheduler.Wait(1e6 / int64(packetRate))
 			c.mux.write(pkt)
 		}
 	}
@@ -474,6 +483,7 @@ func (c *Conn) eventEXP() {
 }
 
 func (c *Conn) adjustSendBuffer() {
+	c.packetRate = c.cc.PacketRate()
 	c.sendWindow = c.cc.SendWindow()
 	if c.sendWindow > len(c.sendBuffer) {
 		if c.sendWindow <= cap(c.sendBuffer) {
