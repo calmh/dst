@@ -124,7 +124,7 @@ func BenchmarkUDP(b *testing.B) {
 		}
 	}
 
-	b.SetBytes(1024)
+	b.SetBytes(1472)
 }
 
 func BenchmarkUDPDevNull(b *testing.B) {
@@ -153,7 +153,7 @@ func BenchmarkUDPDevNull(b *testing.B) {
 		}
 	}
 
-	b.SetBytes(1024)
+	b.SetBytes(1472)
 }
 
 func BenchmarkUDPDialled(b *testing.B) {
