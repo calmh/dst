@@ -84,6 +84,7 @@ func BenchmarkTCP(b *testing.B) {
 
 	b.SetBytes(65536)
 }
+
 func BenchmarkUDP(b *testing.B) {
 	aConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {
@@ -120,6 +121,35 @@ func BenchmarkUDP(b *testing.B) {
 		}
 		if n != 1472 {
 			b.Fatalf("%d != 1472", n)
+		}
+	}
+
+	b.SetBytes(1024)
+}
+
+func BenchmarkUDPDevNull(b *testing.B) {
+	aConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	aConn.SetWriteBuffer(4096 * 1024)
+
+	bConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	bConn.SetReadBuffer(4096 * 1024)
+	bAddr := bConn.LocalAddr()
+
+	src := make([]byte, 1472)
+	io.ReadFull(rand.Reader, src)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := aConn.WriteTo(src, bAddr)
+		if err != nil {
+			b.Fatal(err)
 		}
 	}
 
