@@ -1,6 +1,7 @@
 package dst
 
 import (
+	"code.google.com/p/curvecp/ringbuf"
 	"fmt"
 	"io"
 	"log"
@@ -57,7 +58,7 @@ type Conn struct {
 	nextMsgNo    uint32
 	nextSeqNoMut sync.Mutex
 
-	inbuf     []byte
+	inbuf     *ringbuf.Ringbuf
 	inbufMut  sync.Mutex
 	inbufCond *sync.Cond
 
@@ -188,6 +189,7 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn.expReset = time.Now()
 
 	conn.ackSent = make([]ackTimestamp, 5)
+	conn.inbuf = ringbuf.New(8192 * 1024)
 
 	if conn.cc == nil {
 		conn.cc = NewWindowCC()
@@ -639,8 +641,7 @@ func (c *Conn) recvdShutdown(pkt connPacket) {
 }
 
 func (c *Conn) recvdData(pkt connPacket) {
-	expected := c.lastRecvSeqNo
-	if pkt.hdr.sequenceNo == expected {
+	if pkt.hdr.sequenceNo == c.lastRecvSeqNo {
 		// An in-sequence packet.
 
 		c.lastRecvSeqNo = (pkt.hdr.sequenceNo + uint32(len(pkt.data))) & (1<<31 - 1)
@@ -650,19 +651,29 @@ func (c *Conn) recvdData(pkt connPacket) {
 			c.sendACK()
 		}
 
-		c.inbufMut.Lock()
-		c.inbuf = append(c.inbuf, pkt.data...)
-		c.inbufCond.Signal()
-		c.inbufMut.Unlock()
-	} else if diff := pkt.hdr.sequenceNo - expected; diff > 1<<30 {
+		s := 0
+		for {
+			c.inbufMut.Lock()
+			n := c.inbuf.Write(pkt.data[s:])
+			s += n
+			c.inbufCond.Broadcast()
+			if len(pkt.data[s:]) > 0 {
+				c.inbufCond.Wait()
+				continue
+			} else {
+				c.inbufMut.Unlock()
+				break
+			}
+		}
+	} else if diff := pkt.hdr.sequenceNo - c.lastRecvSeqNo; diff > 1<<30 {
 		if debugConnection {
-			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, expected)
+			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.lastRecvSeqNo)
 		}
 		c.rcvdUnacked++
 		atomic.AddUint64(&c.droppedPackets, 1)
 	} else {
 		if debugConnection {
-			log.Printf("%v lost; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, expected)
+			log.Printf("%v lost; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.lastRecvSeqNo)
 		}
 		atomic.AddUint64(&c.droppedPackets, 1)
 	}
@@ -729,19 +740,16 @@ func (c *Conn) String() string {
 // after a fixed time limit; see SetDeadline and SetReadDeadline.
 func (c *Conn) Read(b []byte) (n int, err error) {
 	c.inbufMut.Lock()
-	for len(c.inbuf) == 0 {
+	defer c.inbufMut.Unlock()
+	for c.inbuf.Size() == 0 {
 		select {
 		case <-c.closed:
-			c.inbufMut.Unlock()
 			return 0, io.EOF
 		default:
 		}
 		c.inbufCond.Wait()
 	}
-	n = copy(b, c.inbuf)
-	c.inbuf = c.inbuf[n:]
-	c.inbufMut.Unlock()
-	return n, nil
+	return c.inbuf.Read(b), nil
 }
 
 // Write writes data to the connection.

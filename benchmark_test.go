@@ -32,14 +32,14 @@ func benchmarkWithLoss(b *testing.B, loss float64) {
 	src := make([]byte, 65536)
 	io.ReadFull(rand.Reader, src)
 
-	go func() {
-		for i := 0; i < b.N; i++ {
+	go func(n int) {
+		for i := 0; i < n; i++ {
 			_, err := aConn.Write(src)
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
-	}()
+	}(b.N)
 
 	b.ResetTimer()
 
@@ -64,14 +64,14 @@ func BenchmarkTCPNoLoss(b *testing.B) {
 	src := make([]byte, 65536)
 	io.ReadFull(rand.Reader, src)
 
-	go func() {
-		for i := 0; i < b.N; i++ {
+	go func(n int) {
+		for i := 0; i < n; i++ {
 			_, err := aConn.Write(src)
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
-	}()
+	}(b.N)
 
 	b.ResetTimer()
 
@@ -85,4 +85,3 @@ func BenchmarkTCPNoLoss(b *testing.B) {
 
 	b.SetBytes(65536)
 }
-
