@@ -90,21 +90,21 @@ func BenchmarkUDP(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	aConn.SetWriteBuffer(4096 * 1024)
+	aConn.SetReadBuffer(4096 * 1024)
+	aAddr := aConn.LocalAddr()
 
 	bConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {
 		b.Fatal(err)
 	}
-	bConn.SetReadBuffer(4096 * 1024)
-	bAddr := bConn.LocalAddr()
+	bConn.SetWriteBuffer(4096 * 1024)
 
 	src := make([]byte, 1472)
 	io.ReadFull(rand.Reader, src)
 
 	go func(n int) {
 		for i := 0; i < n; i++ {
-			_, err := aConn.WriteTo(src, bAddr)
+			_, err := bConn.WriteTo(src, aAddr)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -115,7 +115,7 @@ func BenchmarkUDP(b *testing.B) {
 
 	buf := make([]byte, 1472)
 	for i := 0; i < b.N; i++ {
-		n, err := bConn.Read(buf)
+		n, err := aConn.Read(buf)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -132,14 +132,14 @@ func BenchmarkUDPDevNull(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	aConn.SetWriteBuffer(4096 * 1024)
+	aConn.SetReadBuffer(4096 * 1024)
+	aAddr := aConn.LocalAddr()
 
 	bConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {
 		b.Fatal(err)
 	}
-	bConn.SetReadBuffer(4096 * 1024)
-	bAddr := bConn.LocalAddr()
+	bConn.SetWriteBuffer(4096 * 1024)
 
 	src := make([]byte, 1472)
 	io.ReadFull(rand.Reader, src)
@@ -147,7 +147,43 @@ func BenchmarkUDPDevNull(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := aConn.WriteTo(src, bAddr)
+		_, err := bConn.WriteTo(src, aAddr)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.SetBytes(1024)
+}
+
+func BenchmarkUDPDialled(b *testing.B) {
+	aConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	aConn.SetReadBuffer(4096 * 1024)
+
+	go func() {
+		// Don't care about the results here, just pull stuff from the read buffer
+		buf := make([]byte, 1024)
+		for {
+			aConn.Read(buf)
+		}
+	}()
+
+	bConn, err := net.DialUDP("udp", nil, aConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		b.Fatal(err)
+	}
+	bConn.SetWriteBuffer(4096 * 1024)
+
+	src := make([]byte, 1472)
+	io.ReadFull(rand.Reader, src)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := bConn.Write(src)
 		if err != nil {
 			b.Fatal(err)
 		}
