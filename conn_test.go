@@ -135,14 +135,14 @@ func TestSequenceWrap(t *testing.T) {
 	}
 
 	// needs to be large enough to enforce an ack cycle, to test that code
-	size := 65536
+	size := 10240
 	n := 128
 
 	src := make([]byte, size)
 	io.ReadFull(rand.Reader, src)
 
-	aConn.nextSeqNo = 2<<30 - uint32(size*n/2)
-	bConn.debugResetRecvSeqNo <- 2<<30 - uint32(size*n/2)
+	aConn.nextSeqNo = uint32(2<<31 - size*n/2)
+	bConn.debugResetRecvSeqNo <- uint32(2<<31 - size*n/2)
 
 	go func() {
 		for i := 0; i < n; i++ {

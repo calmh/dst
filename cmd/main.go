@@ -56,8 +56,12 @@ func test(conn net.Conn) {
 			if err != nil {
 				break
 			}
+			if time.Since(t0) > time.Second {
+				//log.Printf("%v recv %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
+				c = 0
+				t0 = time.Now()
+			}
 		}
-		log.Printf("%v recv %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
 	}()
 
 	buf := make([]byte, 65536)
@@ -71,8 +75,12 @@ func test(conn net.Conn) {
 		if err != nil {
 			break
 		}
+		if time.Since(t0) > time.Second {
+			log.Printf("%v send %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
+			c = 0
+			t0 = time.Now()
+		}
 	}
-	log.Printf("%v send %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
 
 	conn.Close()
 
