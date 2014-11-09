@@ -67,15 +67,7 @@ type Conn struct {
 	inbufMut  sync.Mutex
 	inbufCond *sync.Cond
 
-	sendBuffer      []connPacket
-	sendBufferSend  int
-	sendBufferWrite int
-	sendLost        []connPacket
-	sendLostSend    int
-	sendWindow      int
-	packetRate      int // target pps
-	unackedMut      sync.Mutex
-	unackedCond     *sync.Cond
+	sendBuffer *sendBuffer
 
 	currentState connState
 	stateMut     sync.Mutex
@@ -154,11 +146,6 @@ const (
 	stateClosed
 )
 
-const (
-	limiterTokensPerSec   = 1e6
-	limiterTokensCapacity = 25e3
-)
-
 func (s connState) String() string {
 	switch s {
 	case stateInit:
@@ -185,10 +172,9 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 		in:                  make(chan connPacket, 1024),
 		closed:              make(chan struct{}),
 		cc:                  cc,
-		writeScheduler:      ratelimit.NewBucketWithRate(limiterTokensPerSec, limiterTokensPerSec),
 		ackSent:             make([]ackTimestamp, 16),
 		inbuf:               ringbuf.New(8192 * 1024),
-		sendBuffer:          make([]connPacket, 16),
+		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		syn:                 time.NewTimer(defSynTime),
 		remoteCookieUpdate:  make(chan uint32),
@@ -200,17 +186,15 @@ func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
 	conn.remoteCookie = cookieCache[dst.String()]
 	cookieCacheMut.Unlock()
 
-	conn.unackedCond = sync.NewCond(&conn.unackedMut)
 	conn.stateCond = sync.NewCond(&conn.stateMut)
 	conn.inbufCond = sync.NewCond(&conn.inbufMut)
 
 	if conn.cc == nil {
 		conn.cc = NewWindowCC()
-		conn.adjustSendBuffer()
 	}
+	conn.sendBuffer.SetWindowAndRate(conn.cc.SendWindow(), conn.cc.PacketRate())
 
 	go conn.reader()
-	go conn.writer()
 
 	return conn
 }
@@ -387,114 +371,20 @@ func (c *Conn) reader() {
 	}
 }
 
-func (c *Conn) writer() {
-	if debugConnection {
-		log.Println(c, "writer() starting")
-		defer log.Println(c, "writer() exiting")
-	}
-
-	c.writeScheduler.Take(limiterTokensCapacity)
-	for {
-		/*
-			                          sendBufferWindow
-			                         v
-				[S|S|S|S|Q|Q|Q|Q| | | | | | | | | ]
-				         ^       ^sendBufferWrite
-				          sendBufferSend
-		*/
-
-		var pkt connPacket
-		c.unackedMut.Lock()
-		for c.sendLostSend >= c.sendWindow || (c.sendBufferSend == c.sendBufferWrite && c.sendLostSend == len(c.sendLost)) {
-			if debugConnection {
-				log.Println(c, "writer() paused")
-			}
-			c.unackedCond.Wait()
-		}
-
-		if c.sendLostSend < len(c.sendLost) {
-			pkt = c.sendLost[c.sendLostSend]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			c.sendLostSend++
-			atomic.AddUint64(&c.resentPackets, 1)
-		} else if c.sendBufferSend < c.sendBufferWrite {
-			pkt = c.sendBuffer[c.sendBufferSend]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
-			c.sendBufferSend++
-			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(pkt.data)))
-		}
-
-		c.unackedCond.Broadcast()
-		packetRate := c.packetRate
-		c.unackedMut.Unlock()
-
-		if pkt.dst != nil {
-			c.writeScheduler.Wait(limiterTokensPerSec / int64(packetRate))
-			c.mux.write(pkt)
-		}
-	}
-}
-
 func (c *Conn) eventEXP() {
 	if c.getState() != stateConnected {
 		return
 	}
 
-	resent := false
-	c.unackedMut.Lock()
-	if c.sendBufferSend > 0 {
-		// There are packets that have been sent but not acked. Move them from
-		// the send buffer to the loss list for retransmission.
-		resent = true
-		if debugConnection {
-			log.Println(c, "resend from buffer", c.sendBufferSend)
-		}
-
-		// Append the packets to the loss list
-		c.sendLost = append(c.sendLost, c.sendBuffer[:c.sendBufferSend]...)
-
-		// Rewind the send buffer
-		copy(c.sendBuffer, c.sendBuffer[c.sendBufferSend:])
-		c.sendBufferWrite -= c.sendBufferSend
-		c.sendBufferSend = 0
-	}
-
-	if c.sendLostSend > 0 {
-		// Also resend whatever was already in the loss list
-		resent = true
-		if debugConnection {
-			log.Println(c, "resend from loss list", c.sendLostSend)
-		}
-		c.sendLostSend = 0
-	}
-
+	resent := c.sendBuffer.ScheduleResend()
 	if resent {
 		c.cc.Exp()
-		c.adjustSendBuffer()
-		c.unackedCond.Broadcast()
+		c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
 	}
-
-	c.unackedMut.Unlock()
 
 	c.expCount++
 	if resent && c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
 		c.Close()
-	}
-}
-
-func (c *Conn) adjustSendBuffer() {
-	c.packetRate = c.cc.PacketRate()
-	c.sendWindow = c.cc.SendWindow()
-	if c.sendWindow > len(c.sendBuffer) {
-		if c.sendWindow <= cap(c.sendBuffer) {
-			c.sendBuffer = c.sendBuffer[:c.sendWindow]
-		} else {
-			sb := make([]connPacket, c.sendWindow)
-			copy(sb, c.sendBuffer)
-			c.sendBuffer = sb
-		}
-		c.unackedCond.Broadcast()
 	}
 }
 
@@ -590,61 +480,12 @@ func (c *Conn) recvdACK(pkt connPacket) {
 	if debugConnection {
 		log.Printf("%v read ACK 0x%08x", c, ack)
 	}
-	c.unackedMut.Lock()
 
-	// Cut packets from the loss list if they have been acked
+	c.sendBuffer.Acknowledge(ack)
 
-	cut := 0
-	for i := range c.sendLost {
-		if i >= c.sendLostSend {
-			break
-		}
-		if diff := c.sendLost[i].hdr.sequenceNo - ack; diff < 1<<30 {
-			break
-		}
-		cut = i + 1
-	}
-	if cut > 0 {
-		for _, pkt := range c.sendLost[:cut] {
-			c.mux.buffers.Put(pkt.data)
-		}
-		c.sendLost = c.sendLost[cut:]
-		c.sendLostSend -= cut
-		c.unackedCond.Broadcast()
-	}
+	c.cc.Ack()
+	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
 
-	// Find the first packet that is still unacked, so we can cut
-	// the packets ahead of it in the list.
-
-	cut = 0
-	for i := range c.sendBuffer {
-		if i >= c.sendBufferSend {
-			break
-		}
-		if diff := c.sendBuffer[i].hdr.sequenceNo - ack; diff < 1<<30 {
-			break
-		}
-		cut = i + 1
-	}
-
-	// If something is to be cut, do so and notify any writers
-	// that might be blocked.
-
-	if cut > 0 {
-		for _, pkt := range c.sendBuffer[:cut] {
-			c.mux.buffers.Put(pkt.data)
-		}
-
-		copy(c.sendBuffer, c.sendBuffer[cut:])
-		c.sendBufferSend -= cut
-		c.sendBufferWrite -= cut
-
-		c.cc.Ack()
-		c.adjustSendBuffer()
-
-		c.unackedCond.Broadcast()
-	}
-	c.unackedMut.Unlock()
 	c.resetExp()
 }
 
@@ -846,24 +687,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.nextSeqNo += uint32(len(slice))
 		c.nextSeqNoMut.Unlock()
 
-		c.unackedMut.Lock()
-		for c.sendBufferWrite == len(c.sendBuffer) || c.sendBufferWrite >= c.sendWindow {
-			if debugConnection {
-				log.Println(c, "Write blocked")
-			}
-			c.unackedCond.Wait()
-			// Connection may have closed while we were waiting
-			select {
-			case <-c.closed:
-				c.unackedMut.Unlock()
-				return sent, ErrClosed
-			default:
-			}
-		}
-		c.sendBuffer[c.sendBufferWrite] = pkt
-		c.sendBufferWrite++
-		c.unackedCond.Broadcast()
-		c.unackedMut.Unlock()
+		c.sendBuffer.Write(pkt)
 
 		sent += len(slice)
 		c.resetExp()
@@ -875,15 +699,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
+		c.sendBuffer.Stop()
 		c.mux.removeConn(c)
 		close(c.closed)
 		c.setState(stateClosed)
 		c.inbufMut.Lock()
 		c.inbufCond.Broadcast()
 		c.inbufMut.Unlock()
-		c.unackedMut.Lock()
-		c.unackedCond.Broadcast()
-		c.unackedMut.Unlock()
 	})
 	return nil
 }
