@@ -81,11 +81,11 @@ func newLossyMux(loss float64) (*Mux, error) {
 		mp := NewMux(&LossyPacketConn{
 			lossProbability: loss,
 			conn:            conn,
-		})
+		}, 0)
 		return mp, nil
 	}
 
-	return NewMux(conn), nil
+	return NewMux(conn, 0), nil
 }
 
 type LossyPacketConn struct {

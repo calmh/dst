@@ -13,8 +13,9 @@ func ExampleMux_Dial() {
 		panic(err)
 	}
 
-	// Create a UDT mux around the packet connection.
-	mux := dst.NewMux(udpConn)
+	// Create a UDT mux around the packet connection with the default max
+	// packet size.
+	mux := dst.NewMux(udpConn, 0)
 
 	// Dial a UDT connection. The address is that of a remote UDT mux.
 	conn, err := mux.Dial("dst", "192.0.2.42:23458")
@@ -35,8 +36,9 @@ func ExampleMux_Accept() {
 		panic(err)
 	}
 
-	// Create a UDT mux around the packet connection.
-	mux := dst.NewMux(udpConn)
+	// Create a UDT mux around the packet connection with the default max
+	// packet size.
+	mux := dst.NewMux(udpConn, 0)
 
 	// Accept new UDT connections and handle them in a separate routine.
 	for {

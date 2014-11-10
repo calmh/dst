@@ -12,36 +12,34 @@ var headerTests = []struct {
 	hdr header
 }{
 	{
-		"00000000 00000000 00000000 00000000",
+		"00000000 00000000 00000000",
 		header{},
 	},
 	{
-		"00123456 A0008901 98765432 23457853",
+		"00123456 A0008901 98765432",
 		header{
 			packetType: typeData,
 			flags:      0,
 			connID:     0x123456,
 			sequenceNo: 0xA0008901,
 			timestamp:  0x98765432,
-			extra:      0x23457853,
 		},
 	},
 	{
-		"34340000 22334455 55667788 99887766",
+		"34340000 22334455 55667788",
 		header{
 			packetType: typeACK,
 			flags:      flagsCookie,
 			connID:     0x340000,
 			sequenceNo: 0x22334455,
 			timestamp:  0x55667788,
-			extra:      0x99887766,
 		},
 	},
 }
 
 func TestEncodeHeaders(t *testing.T) {
 	for i, tc := range headerTests {
-		var actual [16]byte
+		var actual [dstHeaderLen]byte
 		tc.hdr.marshal(actual[:])
 		expected, _ := hex.DecodeString(strings.Replace(tc.hex, " ", "", -1))
 

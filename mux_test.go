@@ -13,7 +13,7 @@ func TestMuxNew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := dst.NewMux(conn)
+	mp := dst.NewMux(conn, 0)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -25,7 +25,7 @@ func TestMuxClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := dst.NewMux(conn)
+	mp := dst.NewMux(conn, 0)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}
@@ -47,7 +47,7 @@ func TestMuxAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mp := dst.NewMux(conn)
+	mp := dst.NewMux(conn, 0)
 	if mp == nil {
 		t.Error("Unexpected nil Mux")
 	}

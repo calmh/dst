@@ -18,11 +18,10 @@ import (
 )
 
 const (
-	defExpTime        = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	defSynTime        = 10 * time.Millisecond
-	expCountClose     = 16               // close connection after this many EXPs
-	minTimeClose      = 15 * time.Second // if at least this long has passed
-	handshakeInterval = time.Second
+	defExpTime    = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
+	defSynTime    = 10 * time.Millisecond
+	expCountClose = 16               // close connection after this many EXPs
+	minTimeClose  = 15 * time.Second // if at least this long has passed
 
 	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
@@ -30,13 +29,6 @@ const (
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
-
-var (
-	// The cookie cache improves connection setup time by remembering the SYN
-	// cookies sent by remote muxes.
-	cookieCache    = map[string]uint32{}
-	cookieCacheMut sync.Mutex
-)
 
 type CongestionController interface {
 	Ack()
@@ -69,10 +61,6 @@ type Conn struct {
 
 	sendBuffer *sendBuffer
 
-	currentState connState
-	stateMut     sync.Mutex
-	stateCond    *sync.Cond
-
 	exp    *time.Timer
 	expMut sync.Mutex
 
@@ -96,11 +84,6 @@ type Conn struct {
 
 	expCount int
 	expReset time.Time
-
-	// Only touched by the handshake routine, needs no locking
-
-	remoteCookie       uint32
-	remoteCookieUpdate chan uint32
 
 	// Special
 
@@ -136,168 +119,33 @@ func (p connPacket) String() string {
 	return fmt.Sprintf("%08x->%v %v %d", p.src, p.dst, p.hdr, len(p.data))
 }
 
-type connState int
-
-const (
-	stateInit connState = iota
-	stateClientHandshake
-	stateServerHandshake
-	stateConnected
-	stateClosed
-)
-
-func (s connState) String() string {
-	switch s {
-	case stateInit:
-		return "Init"
-	case stateClientHandshake:
-		return "ClientHandshake"
-	case stateServerHandshake:
-		return "ServerHandshake"
-	case stateConnected:
-		return "Connected"
-	case stateClosed:
-		return "Closed"
-	default:
-		return "Unknown"
-	}
-}
-
-func newConn(m *Mux, dst net.Addr, size int, cc CongestionController) *Conn {
+func newConn(m *Mux, dst net.Addr) *Conn {
 	conn := &Conn{
 		mux:                 m,
 		dst:                 dst,
 		nextSeqNo:           uint32(rand.Int31()),
-		packetSize:          size,
+		packetSize:          maxPacketSize,
 		in:                  make(chan connPacket, 1024),
 		closed:              make(chan struct{}),
-		cc:                  cc,
 		ackSent:             make([]ackTimestamp, 16),
 		inbuf:               ringbuf.New(8192 * 1024),
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		syn:                 time.NewTimer(defSynTime),
-		remoteCookieUpdate:  make(chan uint32),
 		debugResetRecvSeqNo: make(chan uint32),
 		expReset:            time.Now(),
 	}
 
-	cookieCacheMut.Lock()
-	conn.remoteCookie = cookieCache[dst.String()]
-	cookieCacheMut.Unlock()
-
-	conn.stateCond = sync.NewCond(&conn.stateMut)
 	conn.inbufCond = sync.NewCond(&conn.inbufMut)
 
-	if conn.cc == nil {
-		conn.cc = NewWindowCC()
-	}
+	conn.cc = NewWindowCC()
 	conn.sendBuffer.SetWindowAndRate(conn.cc.SendWindow(), conn.cc.PacketRate())
-
-	go conn.reader()
 
 	return conn
 }
 
-func (c *Conn) setState(newState connState) {
-	c.stateMut.Lock()
-	c.currentState = newState
-	if debugConnection {
-		log.Println(c, "new state", newState)
-	}
-	c.stateCond.Broadcast()
-	c.stateMut.Unlock()
-}
-
-func (c *Conn) waitForNewState() connState {
-	c.stateMut.Lock()
-	defer c.stateMut.Unlock()
-	c.stateCond.Wait()
-	return c.currentState
-}
-func (c *Conn) getState() connState {
-	c.stateMut.Lock()
-	defer c.stateMut.Unlock()
-	return c.currentState
-}
-
-// handshake performs the client side handshake (i.e. Dial)
-func (c *Conn) handshake(timeout time.Duration) error {
-	nextHandshake := time.NewTimer(0)
-	handshakeTimeout := time.NewTimer(timeout)
-
-	// Feed state changes into the states channel. Make sure to exit when the
-	// handshake is complete or aborted.
-
-	states := make(chan connState)
-	done := make(chan struct{})
-	defer close(done)
-
-	go func() {
-		for {
-			state := c.waitForNewState()
-			select {
-			case <-done:
-				return
-			case states <- state:
-			}
-		}
-	}()
-
-	// Wait for timers or state changes.
-
-	for {
-		select {
-		case <-c.closed:
-			// Failure. The connection has been closed during handshake for
-			// whatever reason.
-			return ErrClosed
-
-		case state := <-states:
-			switch state {
-			case stateConnected:
-				// Success. The reader changed state to connected.
-				return nil
-			case stateClosed:
-				// Failure. The connection has been closed during handshake
-				// for whatever reason.
-				return ErrClosed
-			default:
-				panic(fmt.Sprintf("bug: weird state transition: %v", state))
-			}
-
-		case <-handshakeTimeout.C:
-			// Handshake timeout. Close and abort.
-			c.Close()
-			return ErrHandshakeTimeout
-
-		case cookie := <-c.remoteCookieUpdate:
-			// We received a cookie challenge from the server side. Update our
-			// cookie and immediately schedule a new handshake request.
-			c.remoteCookie = cookie
-			nextHandshake.Reset(0)
-
-		case <-nextHandshake.C:
-			// Send a handshake request.
-
-			data := make([]byte, 4*4)
-			c.nextSeqNoMut.Lock()
-			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, c.remoteCookie}.marshal(data)
-			c.nextSeqNoMut.Unlock()
-			c.mux.write(connPacket{
-				src: c.connID,
-				dst: c.dst,
-				hdr: header{
-					packetType: typeHandshake,
-					flags:      flagsRequest,
-					connID:     0,
-				},
-				data: data,
-			})
-			atomic.AddUint64(&c.bytesOut, uint64(len(data)))
-			nextHandshake.Reset(handshakeInterval)
-		}
-	}
+func (c *Conn) start() {
+	go c.reader()
 }
 
 func (c *Conn) reader() {
@@ -339,8 +187,6 @@ func (c *Conn) reader() {
 			switch pkt.hdr.packetType {
 			case typeData:
 				c.recvdData(pkt)
-			case typeHandshake:
-				c.recvdHandshake(pkt)
 			case typeKeepAlive:
 				c.recvdKeepAlive(pkt)
 			case typeACK:
@@ -349,6 +195,9 @@ func (c *Conn) reader() {
 				c.recvdACK2(pkt)
 			case typeShutdown:
 				c.recvdShutdown(pkt)
+			default:
+				log.Println("Unhandled packet", pkt)
+				continue
 			}
 
 			if len(pkt.data) > 0 {
@@ -372,10 +221,6 @@ func (c *Conn) reader() {
 }
 
 func (c *Conn) eventEXP() {
-	if c.getState() != stateConnected {
-		return
-	}
-
 	resent := c.sendBuffer.ScheduleResend()
 	if resent {
 		c.cc.Exp()
@@ -389,78 +234,13 @@ func (c *Conn) eventEXP() {
 }
 
 func (c *Conn) eventSYN() {
-	if c.getState() != stateConnected {
-		return
-	}
 	if c.rcvdUnacked > 0 {
 		c.sendACK()
 	}
 }
 
-func (c *Conn) recvdHandshake(pkt connPacket) {
-	switch pkt.hdr.packetType {
-	case typeHandshake:
-		switch c.getState() {
-		case stateServerHandshake:
-			// We received an initial handshake from a client. Respond
-			// to it.
-
-			var hd handshakeData
-			hd.unmarshal(pkt.data)
-
-			c.nextRecvSeqNo = hd.seqNo
-			c.lastAckedSeqNo = hd.seqNo
-			if int(hd.packetSize) < c.packetSize {
-				c.packetSize = int(hd.packetSize)
-			}
-			c.remoteConnID = hd.connID
-
-			data := make([]byte, 4*4)
-			c.nextSeqNoMut.Lock()
-			handshakeData{c.nextSeqNo, uint32(c.packetSize), c.connID, hd.cookie}.marshal(data)
-			c.nextSeqNoMut.Unlock()
-			c.mux.write(connPacket{
-				src: c.connID,
-				dst: c.dst,
-				hdr: header{
-					packetType: typeHandshake,
-					flags:      flagsResponse,
-					connID:     c.remoteConnID,
-				},
-				data: data,
-			})
-			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, dstHeaderLen+uint64(len(data)))
-			c.setState(stateConnected)
-
-		case stateClientHandshake:
-			// We received a handshake response.
-			var hd handshakeData
-			hd.unmarshal(pkt.data)
-
-			if pkt.hdr.flags&flagsCookie != 0 {
-				// Not actually a response, but a cookie challenge.
-				cookieCacheMut.Lock()
-				cookieCache[c.dst.String()] = hd.cookie
-				cookieCacheMut.Unlock()
-				c.remoteCookieUpdate <- hd.cookie
-			} else {
-				c.remoteConnID = hd.connID
-				c.nextRecvSeqNo = hd.seqNo
-				c.packetSize = int(hd.packetSize)
-				c.lastAckedSeqNo = c.nextRecvSeqNo
-				c.setState(stateConnected)
-			}
-
-		default:
-			log.Println("handshake packet in non handshake mode")
-			return
-		}
-	}
-}
-
 func (c *Conn) recvdACK(pkt connPacket) {
-	ack := pkt.hdr.extra
+	ack := pkt.hdr.sequenceNo
 
 	data := make([]byte, 8)
 	binary.BigEndian.PutUint32(data, uint32(c.avgRTT))
@@ -472,7 +252,7 @@ func (c *Conn) recvdACK(pkt connPacket) {
 		hdr: header{
 			packetType: typeACK2,
 			connID:     c.remoteConnID,
-			extra:      ack,
+			sequenceNo: ack,
 		},
 		data: data,
 	})
@@ -490,7 +270,7 @@ func (c *Conn) recvdACK(pkt connPacket) {
 }
 
 func (c *Conn) recvdACK2(pkt connPacket) {
-	ack := pkt.hdr.extra
+	ack := pkt.hdr.sequenceNo
 	now := time.Now().UnixNano() / 1000
 
 	if len(pkt.data) == 8 {
@@ -586,7 +366,7 @@ func (c *Conn) sendACK() {
 		hdr: header{
 			packetType: typeACK,
 			connID:     c.remoteConnID,
-			extra:      c.nextRecvSeqNo,
+			sequenceNo: c.nextRecvSeqNo,
 		},
 	})
 
@@ -702,7 +482,6 @@ func (c *Conn) Close() error {
 		c.sendBuffer.Stop()
 		c.mux.removeConn(c)
 		close(c.closed)
-		c.setState(stateClosed)
 		c.inbufMut.Lock()
 		c.inbufCond.Broadcast()
 		c.inbufMut.Unlock()

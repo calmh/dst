@@ -86,6 +86,9 @@ func TestSingleDataPacket(t *testing.T) {
 	if data := buf[:n]; bytes.Compare(data, src) != 0 {
 		t.Errorf("Incorrect data %q != %q", data, src)
 	}
+
+	// So that an ACK is visible in the trace when running with -tags debug...
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestClosedReadWrite(t *testing.T) {
@@ -298,14 +301,13 @@ func TestPacketSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	muxA := NewMux(connA)
-	muxA.SetPacketSize(256)
+	muxA := NewMux(connA, 256)
 
 	connB, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	muxB := NewMux(connB)
+	muxB := NewMux(connB, 0)
 
 	errors := make(chan error)
 	go func() {
