@@ -370,18 +370,10 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 
 	default:
 		m.connsMut.Lock()
-		conn, connOk := m.conns[hdr.connID]
-		handShake, hndOk := m.handshakes[hdr.connID]
+		handShake, ok := m.handshakes[hdr.connID]
 		m.connsMut.Unlock()
 
-		if connOk {
-			// This is an established connection.
-			conn.in <- connPacket{
-				dst:  nil,
-				hdr:  hdr,
-				data: data,
-			}
-		} else if hndOk {
+		if ok {
 			// This is a response to a handshake in progress.
 			handShake <- connPacket{
 				dst:  nil,

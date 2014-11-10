@@ -177,10 +177,9 @@ func (b *sendBuffer) ScheduleResend() (resent bool) {
 // SetWindowAndRate sets the window size (in packets) and packet rate (in
 // packets per second) to use when sending.
 func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
+	b.mut.Lock()
 	b.packetRate = packetRate
 	b.sendWindow = sendWindow
-
-	b.mut.Lock()
 	if b.sendWindow > len(b.buffer) {
 		if b.sendWindow <= cap(b.buffer) {
 			b.buffer = b.buffer[:b.sendWindow]
