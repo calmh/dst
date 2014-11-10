@@ -162,14 +162,18 @@ func (c *Conn) reader() {
 				c.sendACK()
 			}
 			// Send a shutdown message.
+			c.nextSeqNoMut.Lock()
 			c.mux.write(connPacket{
 				src: c.connID,
 				dst: c.dst,
 				hdr: header{
 					packetType: typeShutdown,
 					connID:     c.remoteConnID,
+					sequenceNo: c.nextSeqNo,
 				},
 			})
+			c.nextSeqNo++
+			c.nextSeqNoMut.Unlock()
 			atomic.AddUint64(&c.packetsOut, 1)
 			atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 			return
@@ -315,7 +319,9 @@ func (c *Conn) recvdKeepAlive(pkt connPacket) {
 }
 
 func (c *Conn) recvdShutdown(pkt connPacket) {
-	c.Close()
+	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
+		c.Close()
+	}
 }
 
 func (c *Conn) recvdData(pkt connPacket) {
@@ -358,7 +364,6 @@ func (c *Conn) recvdData(pkt connPacket) {
 }
 
 func (c *Conn) sendACK() {
-
 	now := time.Now().UnixNano() / 1000
 	c.mux.write(connPacket{
 		src: c.connID,

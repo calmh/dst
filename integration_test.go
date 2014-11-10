@@ -40,7 +40,7 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvMux := dst.NewMux(srvConn)
+	srvMux := dst.NewMux(srvConn, 0)
 
 	go func() {
 		for {
@@ -57,7 +57,7 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientMux := dst.NewMux(clientConn)
+	clientMux := dst.NewMux(clientConn, 0)
 
 	var wg sync.WaitGroup
 	t0 := time.Now()

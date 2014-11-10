@@ -56,12 +56,23 @@ func TestAddrs(t *testing.T) {
 	}
 }
 
-func TestSingleDataPacket(t *testing.T) {
+func TestSingleDataPacketC2S(t *testing.T) {
 	a, b, err := connPair(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	testSingleDataPacket(a, b, t)
+}
 
+func TestSingleDataPacketS2C(t *testing.T) {
+	a, b, err := connPair(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testSingleDataPacket(b, a, t)
+}
+
+func testSingleDataPacket(a, b net.Conn, t *testing.T) {
 	src := []byte("Hello, World!")
 
 	var wg sync.WaitGroup
