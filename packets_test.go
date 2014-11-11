@@ -29,7 +29,7 @@ var headerTests = []struct {
 		"34340000 22334455 55667788",
 		header{
 			packetType: typeACK,
-			flags:      flagsCookie,
+			flags:      flagCookie,
 			connID:     0x340000,
 			sequenceNo: 0x22334455,
 			timestamp:  0x55667788,
@@ -52,8 +52,7 @@ func TestEncodeHeaders(t *testing.T) {
 func TestDecodeHeaders(t *testing.T) {
 	for i, tc := range headerTests {
 		data, _ := hex.DecodeString(strings.Replace(tc.hex, " ", "", -1))
-		var actual header
-		actual.unmarshal(data)
+		actual := unmarshalHeader(data)
 
 		if !reflect.DeepEqual(actual, tc.hdr) {
 			t.Errorf("Decode %d incorrect;\n  A: %#v\n  E: %#v", i, actual, tc.hdr)

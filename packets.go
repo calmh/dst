@@ -3,6 +3,7 @@ package dst
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 )
 
 type position uint8
@@ -38,19 +39,21 @@ func (t packetType) String() string {
 		return "keepalive"
 	case typeACK:
 		return "ack"
+	case typeACK2:
+		return "ack2"
 	case typeNAK:
 		return "nak"
 	case typeShutdown:
 		return "shutdown"
 	default:
-		return "uknown"
+		return "unknown"
 	}
 }
 
 const (
-	flagsRequest  = 1 << 0
-	flagsResponse = 1 << 1
-	flagsCookie   = 1 << 2
+	flagRequest  = 1 << 0 // This packet is a handshake request
+	flagResponse = 1 << 1 // This packet is a handshake response
+	flagCookie   = 1 << 2 // This packet contains a coookie challenge
 )
 
 type header struct {
@@ -68,12 +71,14 @@ func (h header) marshal(bs []byte) {
 	binary.BigEndian.PutUint32(bs[8:], h.timestamp)
 }
 
-func (h *header) unmarshal(bs []byte) {
+func unmarshalHeader(bs []byte) header {
+	var h header
 	h.packetType = packetType(bs[0] >> 4)
 	h.flags = bs[0] & 0xf
 	h.connID = binary.BigEndian.Uint32(bs) & 0xffffff
 	h.sequenceNo = binary.BigEndian.Uint32(bs[4:])
 	h.timestamp = binary.BigEndian.Uint32(bs[8:])
+	return h
 }
 
 func (h header) String() string {
@@ -98,12 +103,34 @@ func (h handshakeData) marshal() []byte {
 	return data[:]
 }
 
-func (h *handshakeData) unmarshal(data []byte) {
+func unmarshalHandshakeData(data []byte) handshakeData {
+	var h handshakeData
 	h.packetSize = binary.BigEndian.Uint32(data[0:])
 	h.connID = binary.BigEndian.Uint32(data[4:])
 	h.cookie = binary.BigEndian.Uint32(data[8:])
+	return h
 }
 
 func (h handshakeData) String() string {
-	return fmt.Sprintf("handshake{size=%d connID=0x%06x cookie=0x%08x", h.packetSize, h.connID, h.cookie)
+	return fmt.Sprintf("handshake{size=%d connID=0x%06x cookie=0x%08x}", h.packetSize, h.connID, h.cookie)
+}
+
+type packet struct {
+	src  uint32
+	dst  net.Addr
+	hdr  header
+	data []byte
+}
+
+func (p packet) String() string {
+	var dst string
+	if p.dst != nil {
+		dst = "dst=" + p.dst.String() + " "
+	}
+	switch p.hdr.packetType {
+	case typeHandshake:
+		return fmt.Sprintf("%spacket{src=0x%08x %v %v}", dst, p.src, p.hdr, unmarshalHandshakeData(p.data))
+	default:
+		return fmt.Sprintf("%spacket{src=0x%08x %v data[:%d]}", dst, p.src, p.hdr, len(p.data))
+	}
 }

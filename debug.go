@@ -1,5 +1,11 @@
-// +build debug
-
 package dst
 
-const debugConnection = true
+import (
+	"os"
+	"strings"
+)
+
+var (
+	debugConnection = strings.Contains(os.Getenv("DSTDEBUG"), "conn")
+	debugMux        = strings.Contains(os.Getenv("DSTDEBUG"), "mux")
+)

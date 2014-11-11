@@ -22,7 +22,7 @@ type Mux struct {
 	packetSize int
 
 	conns      map[uint32]*Conn
-	handshakes map[uint32]chan connPacket
+	handshakes map[uint32]chan packet
 	connsMut   sync.Mutex
 
 	incoming  chan *Conn
@@ -41,7 +41,7 @@ func NewMux(conn net.PacketConn, packetSize int) *Mux {
 		conn:       conn,
 		packetSize: packetSize,
 		conns:      map[uint32]*Conn{},
-		handshakes: make(map[uint32]chan connPacket),
+		handshakes: make(map[uint32]chan packet),
 		incoming:   make(chan *Conn, maxIncomingRequests),
 		closed:     make(chan struct{}),
 		buffers: &sync.Pool{
@@ -147,7 +147,7 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 		return nil, err
 	}
 
-	resp := make(chan connPacket)
+	resp := make(chan packet)
 
 	m.connsMut.Lock()
 	connID := m.newConnID()
@@ -169,8 +169,8 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 }
 
 // handshake performs the client side handshake (i.e. Dial)
-func (m *Mux) clientHandshake(dst net.Addr, connID uint32, resp chan connPacket) (*Conn, error) {
-	if debugConnection {
+func (m *Mux) clientHandshake(dst net.Addr, connID uint32, resp chan packet) (*Conn, error) {
+	if debugMux {
 		log.Printf("%v dial %v connID 0x%08x", m, dst, connID)
 	}
 
@@ -196,28 +196,28 @@ func (m *Mux) clientHandshake(dst net.Addr, connID uint32, resp chan connPacket)
 		case <-nextHandshake.C:
 			// Send a handshake request.
 
-			m.write(connPacket{
+			m.write(packet{
 				src: connID,
 				dst: dst,
 				hdr: header{
 					packetType: typeHandshake,
-					flags:      flagsRequest,
+					flags:      flagRequest,
 					connID:     0,
 					sequenceNo: seqNo,
+					timestamp:  timestampMicros(),
 				},
 				data: handshakeData{uint32(m.packetSize), connID, remoteCookie}.marshal(),
 			})
 			nextHandshake.Reset(handshakeInterval)
 
 		case pkt := <-resp:
-			var hd handshakeData
-			hd.unmarshal(pkt.data)
+			hd := unmarshalHandshakeData(pkt.data)
 
-			if pkt.hdr.flags&flagsCookie == flagsCookie {
+			if pkt.hdr.flags&flagCookie == flagCookie {
 				// We should resend the handshake request with a different cookie value.
 				remoteCookie = hd.cookie
 				nextHandshake.Reset(0)
-			} else if pkt.hdr.flags&flagsResponse == flagsResponse {
+			} else if pkt.hdr.flags&flagResponse == flagResponse {
 				// Successfull handshake response.
 				conn := newConn(m, dst)
 
@@ -250,8 +250,7 @@ func (m *Mux) readerLoop() {
 		}
 		buf = buf[:n]
 
-		var hdr header
-		hdr.unmarshal(buf)
+		hdr := unmarshalHeader(buf)
 
 		var bufCopy []byte
 		if len(buf) > dstHeaderLen {
@@ -259,8 +258,9 @@ func (m *Mux) readerLoop() {
 			copy(bufCopy, buf[dstHeaderLen:])
 		}
 
-		if debugConnection {
-			log.Printf("%v Read %v", m, hdr)
+		pkt := packet{hdr: hdr, data: bufCopy}
+		if debugMux {
+			log.Println(m, "read", pkt)
 		}
 
 		switch hdr.packetType {
@@ -270,12 +270,12 @@ func (m *Mux) readerLoop() {
 			m.connsMut.Unlock()
 
 			if ok {
-				conn.in <- connPacket{
+				conn.in <- packet{
 					dst:  nil,
 					hdr:  hdr,
 					data: bufCopy,
 				}
-			} else if debugConnection {
+			} else if debugMux {
 				log.Printf("Data packet for unknown conn %08x", hdr.connID)
 			}
 
@@ -288,12 +288,12 @@ func (m *Mux) readerLoop() {
 			m.connsMut.Unlock()
 
 			if ok {
-				conn.in <- connPacket{
+				conn.in <- packet{
 					dst:  nil,
 					hdr:  hdr,
 					data: bufCopy,
 				}
-			} else if debugConnection && hdr.packetType != typeShutdown {
+			} else if debugMux && hdr.packetType != typeShutdown {
 				log.Printf("Control packet %v for unknown conn %08x", hdr, hdr.connID)
 			}
 		}
@@ -305,30 +305,29 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 	case 0:
 		// A new incoming handshake request.
 
-		if hdr.flags&flagsRequest != flagsRequest {
+		if hdr.flags&flagRequest != flagRequest {
 			log.Println("Handshake pattern with flags 0x%x to connID zero", hdr.flags)
 			return
 		}
 
-		var hd handshakeData
-		hd.unmarshal(data)
-
-		if debugConnection {
-			log.Println(m, hd)
-		}
+		hd := unmarshalHandshakeData(data)
 
 		correctCookie := cookie(from)
 		if hd.cookie != correctCookie {
 			// Incorrect or missing SYN cookie. Send back a handshake
 			// with the expected one.
-			m.write(connPacket{
+			m.write(packet{
 				dst: from,
 				hdr: header{
 					packetType: typeHandshake,
-					flags:      flagsResponse | flagsCookie,
+					flags:      flagResponse | flagCookie,
 					connID:     hd.connID,
+					timestamp:  timestampMicros(),
 				},
-				data: handshakeData{cookie: correctCookie}.marshal(),
+				data: handshakeData{
+					packetSize: uint32(m.packetSize),
+					cookie:     correctCookie,
+				}.marshal(),
 			})
 			return
 		}
@@ -352,13 +351,14 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 		m.conns[connID] = conn
 		m.connsMut.Unlock()
 
-		m.write(connPacket{
+		m.write(packet{
 			dst: from,
 			hdr: header{
 				packetType: typeHandshake,
-				flags:      flagsResponse,
+				flags:      flagResponse,
 				connID:     hd.connID,
 				sequenceNo: seqNo,
+				timestamp:  timestampMicros(),
 			},
 			data: handshakeData{
 				connID:     conn.connID,
@@ -375,23 +375,23 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 
 		if ok {
 			// This is a response to a handshake in progress.
-			handShake <- connPacket{
+			handShake <- packet{
 				dst:  nil,
 				hdr:  hdr,
 				data: data,
 			}
-		} else if debugConnection && hdr.packetType != typeShutdown {
+		} else if debugMux && hdr.packetType != typeShutdown {
 			log.Printf("Handshake packet %v for unknown conn %08x", hdr, hdr.connID)
 		}
 	}
 }
 
-func (m *Mux) write(pkt connPacket) (int, error) {
+func (m *Mux) write(pkt packet) (int, error) {
 	buf := m.buffers.Get().([]byte)
 	buf = buf[:dstHeaderLen+len(pkt.data)]
 	pkt.hdr.marshal(buf)
 	copy(buf[dstHeaderLen:], pkt.data)
-	if debugConnection {
+	if debugMux {
 		log.Println(m, "write", pkt)
 	}
 	n, err := m.conn.WriteTo(buf, pkt.dst)

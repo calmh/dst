@@ -47,7 +47,7 @@ type Conn struct {
 	dst          net.Addr
 	connID       uint32
 	remoteConnID uint32
-	in           chan connPacket
+	in           chan packet
 	cc           CongestionController
 
 	// Touched by more than one goroutine, needs locking.
@@ -108,24 +108,13 @@ type ackTimestamp struct {
 	packets    uint64
 }
 
-type connPacket struct {
-	src  uint32
-	dst  net.Addr
-	hdr  header
-	data []byte
-}
-
-func (p connPacket) String() string {
-	return fmt.Sprintf("%08x->%v %v %d", p.src, p.dst, p.hdr, len(p.data))
-}
-
 func newConn(m *Mux, dst net.Addr) *Conn {
 	conn := &Conn{
 		mux:                 m,
 		dst:                 dst,
 		nextSeqNo:           uint32(rand.Int31()),
 		packetSize:          maxPacketSize,
-		in:                  make(chan connPacket, 1024),
+		in:                  make(chan packet, 1024),
 		closed:              make(chan struct{}),
 		ackSent:             make([]ackTimestamp, 16),
 		inbuf:               ringbuf.New(8192 * 1024),
@@ -163,7 +152,7 @@ func (c *Conn) reader() {
 			}
 			// Send a shutdown message.
 			c.nextSeqNoMut.Lock()
-			c.mux.write(connPacket{
+			c.mux.write(packet{
 				src: c.connID,
 				dst: c.dst,
 				hdr: header{
@@ -243,14 +232,14 @@ func (c *Conn) eventSYN() {
 	}
 }
 
-func (c *Conn) recvdACK(pkt connPacket) {
+func (c *Conn) recvdACK(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 
 	data := make([]byte, 8)
 	binary.BigEndian.PutUint32(data, uint32(c.avgRTT))
 	binary.BigEndian.PutUint32(data[4:], uint32(c.avgPPS))
 
-	c.mux.write(connPacket{
+	c.mux.write(packet{
 		src: c.connID,
 		dst: c.dst,
 		hdr: header{
@@ -273,7 +262,7 @@ func (c *Conn) recvdACK(pkt connPacket) {
 	c.resetExp()
 }
 
-func (c *Conn) recvdACK2(pkt connPacket) {
+func (c *Conn) recvdACK2(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 	now := time.Now().UnixNano() / 1000
 
@@ -315,16 +304,16 @@ func (c *Conn) recvdACK2(pkt connPacket) {
 	c.rttMut.Unlock()
 }
 
-func (c *Conn) recvdKeepAlive(pkt connPacket) {
+func (c *Conn) recvdKeepAlive(pkt packet) {
 }
 
-func (c *Conn) recvdShutdown(pkt connPacket) {
+func (c *Conn) recvdShutdown(pkt packet) {
 	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
 		c.Close()
 	}
 }
 
-func (c *Conn) recvdData(pkt connPacket) {
+func (c *Conn) recvdData(pkt packet) {
 	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
 		// An in-sequence packet.
 
@@ -365,7 +354,7 @@ func (c *Conn) recvdData(pkt connPacket) {
 
 func (c *Conn) sendACK() {
 	now := time.Now().UnixNano() / 1000
-	c.mux.write(connPacket{
+	c.mux.write(packet{
 		src: c.connID,
 		dst: c.dst,
 		hdr: header{
@@ -459,7 +448,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		copy(sliceCopy, slice)
 
 		c.nextSeqNoMut.Lock()
-		pkt := connPacket{
+		pkt := packet{
 			src: c.connID,
 			dst: c.dst,
 			hdr: header{

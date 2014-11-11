@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/juju/ratelimit"
 )
@@ -23,12 +22,12 @@ type sendBuffer struct {
 	sendWindow int // maximum number of outstanding non-acked packets
 	packetRate int // target pps
 
-	buffer    []connPacket // buffered packets
-	sendSlot  int          // buffer slot from which to send next packet
-	writeSlot int          // buffer slot in which to write next packet
+	buffer    []packet // buffered packets
+	sendSlot  int      // buffer slot from which to send next packet
+	writeSlot int      // buffer slot in which to write next packet
 
-	lost         []connPacket // list of packets reported lost by timeout
-	lostSendSlot int          // next lost packet to resend
+	lost         []packet // list of packets reported lost by timeout
+	lostSendSlot int      // next lost packet to resend
 
 	closed chan struct{}
 	mut    sync.Mutex
@@ -56,7 +55,7 @@ func newSendBuffer(m *Mux) *sendBuffer {
 
 // Write puts a new packet in send buffer and schedules a send. Blocks when
 // the window size is or would be exceeded.
-func (b *sendBuffer) Write(pkt connPacket) {
+func (b *sendBuffer) Write(pkt packet) {
 	b.mut.Lock()
 	for b.writeSlot == len(b.buffer) || b.writeSlot >= b.sendWindow {
 		if debugConnection {
@@ -184,7 +183,7 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 		if b.sendWindow <= cap(b.buffer) {
 			b.buffer = b.buffer[:b.sendWindow]
 		} else {
-			sb := make([]connPacket, b.sendWindow)
+			sb := make([]packet, b.sendWindow)
 			copy(sb, b.buffer)
 			b.buffer = sb
 		}
@@ -210,7 +209,7 @@ func (b *sendBuffer) writerLoop() {
 
 	b.scheduler.Take(schedulerCapacity)
 	for {
-		var pkt connPacket
+		var pkt packet
 		b.mut.Lock()
 		for b.lostSendSlot >= b.sendWindow ||
 			(b.sendSlot == b.writeSlot && b.lostSendSlot == len(b.lost)) {
@@ -228,11 +227,11 @@ func (b *sendBuffer) writerLoop() {
 
 		if b.lostSendSlot < len(b.lost) {
 			pkt = b.lost[b.lostSendSlot]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			pkt.hdr.timestamp = timestampMicros()
 			b.lostSendSlot++
 		} else if b.sendSlot < b.writeSlot {
 			pkt = b.buffer[b.sendSlot]
-			pkt.hdr.timestamp = uint32(time.Now().UnixNano() / 1000)
+			pkt.hdr.timestamp = timestampMicros()
 			b.sendSlot++
 		}
 
