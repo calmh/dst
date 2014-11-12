@@ -20,6 +20,23 @@ func TestHandshake(t *testing.T) {
 	}
 }
 
+func TestHandshakeTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow test")
+	}
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := NewMux(conn, 0)
+
+	_, err = mux.Dial("dst", "192.0.2.42:4242")
+	if err != ErrHandshakeTimeout {
+		t.Error("Unexpected error", err)
+	}
+}
+
 func TestAddrs(t *testing.T) {
 	a, b, err := connPair(0, 0)
 	if err != nil {
@@ -211,6 +228,10 @@ func TestLargeData(t *testing.T) {
 }
 
 func TestLargeDataLossy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow test")
+	}
+
 	a, b, err := connPair(0.1, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +315,7 @@ func TestTimeoutCloseWrite(t *testing.T) {
 	}
 
 	// Sneakily stop responding on the server side
-	close(b.closed)
+	b.mux.conn.Close()
 
 	for {
 		_, err := a.Write([]byte("stuff to write"))
