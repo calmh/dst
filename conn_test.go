@@ -39,6 +39,9 @@ func TestHandshakeTimeout(t *testing.T) {
 	if err != ErrHandshakeTimeout {
 		t.Error("Unexpected error", err)
 	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Error("Unexpected error string", err.Error())
+	}
 }
 
 func TestAddrs(t *testing.T) {
@@ -341,6 +344,11 @@ func TestPacketSize(t *testing.T) {
 	}
 	muxB := NewMux(connB, 0)
 
+	testPacketSize(muxA, muxB, t) // Small packets on the server side
+	testPacketSize(muxB, muxA, t) // Small packets on the client side
+}
+
+func testPacketSize(muxA, muxB *Mux, t *testing.T) {
 	errors := make(chan error)
 	go func() {
 		conn, err := muxA.AcceptUDT()
