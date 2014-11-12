@@ -78,6 +78,12 @@ func (w *WindowCC) Exp() {
 }
 
 func (w *WindowCC) SendWindow() int {
+	if w.currentWindow < w.minWindow {
+		return w.minWindow
+	}
+	if w.currentWindow > w.maxWindow {
+		return w.maxWindow
+	}
 	return w.currentWindow
 }
 
@@ -86,6 +92,12 @@ func (w *WindowCC) AckPacketIntv() int {
 }
 
 func (w *WindowCC) PacketRate() int {
+	if w.currentRate < w.minRate {
+		return w.minRate
+	}
+	if w.currentRate > w.maxRate {
+		return w.maxRate
+	}
 	return w.currentRate
 }
 
