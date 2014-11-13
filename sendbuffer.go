@@ -26,12 +26,11 @@ type sendBuffer struct {
 	sendWindow int // maximum number of outstanding non-acked packets
 	packetRate int // target pps
 
-	buffer    []packet // buffered packets
-	sendSlot  int      // buffer slot from which to send next packet
-	writeSlot int      // buffer slot in which to write next packet
+	buffer   packetList // buffered packets
+	sendSlot int        // buffer slot from which to send next packet
 
-	lost         []packet // list of packets reported lost by timeout
-	lostSendSlot int      // next lost packet to resend
+	lost         packetList // list of packets reported lost by timeout
+	lostSendSlot int        // next lost packet to resend
 
 	closed chan struct{}
 	mut    sync.Mutex
@@ -61,7 +60,7 @@ func newSendBuffer(m *Mux) *sendBuffer {
 // the window size is or would be exceeded.
 func (b *sendBuffer) Write(pkt packet) {
 	b.mut.Lock()
-	for b.writeSlot == len(b.buffer) || b.writeSlot >= b.sendWindow {
+	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
 		if debugConnection {
 			log.Println(b, "Write blocked")
 		}
@@ -74,66 +73,28 @@ func (b *sendBuffer) Write(pkt packet) {
 		default:
 		}
 	}
-	b.buffer[b.writeSlot] = pkt
-	b.writeSlot++
+	if !b.buffer.Append(pkt) {
+		panic("bug: append failed")
+	}
 	b.cond.Broadcast()
 	b.mut.Unlock()
 }
 
 // Acknowledge removes packets with lower sequence numbers from the loss list
 // or send buffer.
-func (b *sendBuffer) Acknowledge(ack uint32) {
+func (b *sendBuffer) Acknowledge(seq uint32) {
 	b.mut.Lock()
 
-	// Cut packets from the loss list if they have been acked
-
-	cut := 0
-	for i := range b.lost {
-		if i >= b.lostSendSlot {
-			break
-		}
-		if diff := b.lost[i].hdr.sequenceNo - ack; diff < 1<<30 {
-			break
-		}
-		cut = i + 1
-	}
-	if cut > 0 {
-		for _, pkt := range b.lost[:cut] {
-			b.mux.buffers.Put(pkt.data)
-		}
-		b.lost = b.lost[cut:]
+	if cut := b.lost.CutLessSeq(seq); cut > 0 {
 		b.lostSendSlot -= cut
 		b.cond.Broadcast()
 	}
 
-	// Find the first packet that is still unacked, so we can cut
-	// the packets ahead of it in the list.
-
-	cut = 0
-	for i := range b.buffer {
-		if i >= b.sendSlot {
-			break
-		}
-		if diff := b.buffer[i].hdr.sequenceNo - ack; diff < 1<<30 {
-			break
-		}
-		cut = i + 1
-	}
-
-	// If something is to be cut, do so and notify any writers
-	// that might be blocked.
-
-	if cut > 0 {
-		for _, pkt := range b.buffer[:cut] {
-			b.mux.buffers.Put(pkt.data)
-		}
-
-		copy(b.buffer, b.buffer[cut:])
+	if cut := b.buffer.CutLessSeq(seq); cut > 0 {
 		b.sendSlot -= cut
-		b.writeSlot -= cut
-
 		b.cond.Broadcast()
 	}
+
 	b.mut.Unlock()
 }
 
@@ -151,12 +112,9 @@ func (b *sendBuffer) ScheduleResend() (resent bool) {
 			log.Println(b, "resend from buffer", b.sendSlot)
 		}
 
-		// Append the packets to the loss list
-		b.lost = append(b.lost, b.buffer[:b.sendSlot]...)
-
-		// Rewind the send buffer
-		copy(b.buffer, b.buffer[b.sendSlot:])
-		b.writeSlot -= b.sendSlot
+		// Append the packets to the loss list and rewind the send buffer
+		b.lost.AppendAll(b.buffer.All()[:b.sendSlot])
+		b.buffer.Cut(b.sendSlot)
 		b.sendSlot = 0
 	}
 
@@ -183,14 +141,8 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 	b.mut.Lock()
 	b.packetRate = packetRate
 	b.sendWindow = sendWindow
-	if b.sendWindow > len(b.buffer) {
-		if b.sendWindow <= cap(b.buffer) {
-			b.buffer = b.buffer[:b.sendWindow]
-		} else {
-			sb := make([]packet, b.sendWindow)
-			copy(sb, b.buffer)
-			b.buffer = sb
-		}
+	if b.sendWindow > b.buffer.Cap() {
+		b.buffer.Resize(b.sendWindow)
 		b.cond.Broadcast()
 	}
 	b.mut.Unlock()
@@ -216,7 +168,7 @@ func (b *sendBuffer) writerLoop() {
 		var pkt packet
 		b.mut.Lock()
 		for b.lostSendSlot >= b.sendWindow ||
-			(b.sendSlot == b.writeSlot && b.lostSendSlot == len(b.lost)) {
+			(b.sendSlot == b.buffer.Len() && b.lostSendSlot == b.lost.Len()) {
 			select {
 			case <-b.closed:
 				return
@@ -224,17 +176,17 @@ func (b *sendBuffer) writerLoop() {
 			}
 
 			if debugConnection {
-				log.Println(b, "writer() paused", b.lostSendSlot, b.sendSlot, b.sendWindow, len(b.lost))
+				log.Println(b, "writer() paused", b.lostSendSlot, b.sendSlot, b.sendWindow, b.lost.Len())
 			}
 			b.cond.Wait()
 		}
 
-		if b.lostSendSlot < len(b.lost) {
-			pkt = b.lost[b.lostSendSlot]
+		if b.lostSendSlot < b.lost.Len() {
+			pkt = b.lost.All()[b.lostSendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.lostSendSlot++
-		} else if b.sendSlot < b.writeSlot {
-			pkt = b.buffer[b.sendSlot]
+		} else if b.sendSlot < b.buffer.Len() {
+			pkt = b.buffer.All()[b.sendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.sendSlot++
 		}

@@ -138,3 +138,15 @@ func (p packet) String() string {
 		return fmt.Sprintf("%spacket{src=0x%08x %v data[:%d]}", dst, p.src, p.hdr, len(p.data))
 	}
 }
+
+func (p packet) LessSeq(seq uint32) bool {
+	diff := seq - p.hdr.sequenceNo
+	if diff == 0 {
+		return false
+	}
+	return diff < 1<<31
+}
+
+func (a packet) Less(b packet) bool {
+	return a.LessSeq(b.hdr.sequenceNo)
+}

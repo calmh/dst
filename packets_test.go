@@ -63,3 +63,31 @@ func TestDecodeHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestComparison(t *testing.T) {
+	pkts := []packet{
+		packet{hdr: header{sequenceNo: 0}},
+		packet{hdr: header{sequenceNo: 42}},
+		packet{hdr: header{sequenceNo: 96}},
+		packet{hdr: header{sequenceNo: 2<<30 - 1}},
+		packet{hdr: header{sequenceNo: 2 << 30}},
+		packet{hdr: header{sequenceNo: 2<<30 + 1}},
+		packet{hdr: header{sequenceNo: 2<<31 - 2}},
+		packet{hdr: header{sequenceNo: 2<<31 - 1}},
+		packet{hdr: header{sequenceNo: 0}},
+		packet{hdr: header{sequenceNo: 42}},
+	}
+	for i := range pkts {
+		if i > 0 {
+			if !pkts[i-1].Less(pkts[i]) {
+				t.Error(pkts[i-1], "not <", pkts[i])
+			}
+			if pkts[i].Less(pkts[i-1]) {
+				t.Error(pkts[i], "<", pkts[i-1])
+			}
+			if pkts[i].Less(pkts[i]) {
+				t.Error(pkts[i], "<", pkts[i-1])
+			}
+		}
+	}
+}
