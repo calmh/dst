@@ -123,3 +123,98 @@ func TestIntegrationMultipleConnections(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestIntegrationSlowTransfer(t *testing.T) {
+	errors := make(chan error)
+
+	echoServer := func(c net.Conn) {
+		buf := make([]byte, 1024)
+		n, err := c.Read(buf)
+		if err != nil {
+			errors <- err
+			return
+		}
+		_, err = c.Write(buf[:n])
+		if err != nil {
+			errors <- err
+			return
+		}
+		err = c.Close()
+		if err != nil {
+			errors <- err
+			return
+		}
+	}
+
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvMux := dst.NewMux(srvConn, 0)
+
+	go func() {
+		for {
+			conn, err := srvMux.Accept()
+			if err != nil {
+				errors <- err
+				return
+			}
+			go echoServer(conn)
+		}
+	}()
+
+	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientMux := dst.NewMux(clientConn, 0)
+
+	conn, err := clientMux.Dial("dst", srvMux.Addr().String())
+	if err != nil {
+		errors <- err
+		return
+	}
+
+	// Send a message and check for the echo
+
+	msg := []byte("A short text message!")
+	_, err = conn.Write(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n != len(msg) {
+		t.Fatalf("Incorrect message length %d", len(msg))
+	}
+	if bytes.Compare(msg, buf[:n]) != 0 {
+		t.Fatalf("Incorrect message content")
+	}
+
+	time.Sleep(45 * time.Second)
+
+	// Send a message and check for the echo
+
+	msg = []byte("The second message is different.")
+	_, err = conn.Write(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n != len(msg) {
+		t.Fatalf("Incorrect message length %d", len(msg))
+	}
+	if bytes.Compare(msg, buf[:n]) != 0 {
+		t.Fatalf("Incorrect message content")
+	}
+}

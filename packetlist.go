@@ -71,3 +71,43 @@ func (l *packetList) Resize(s int) {
 		l.packets = t
 	}
 }
+
+func (l *packetList) InsertSorted(pkt packet) {
+	for i := range l.packets {
+		if i >= l.slot {
+			l.packets[i] = pkt
+			l.slot++
+			return
+		}
+		if pkt.hdr.sequenceNo == l.packets[i].hdr.sequenceNo {
+			return
+		}
+		if pkt.Less(l.packets[i]) {
+			copy(l.packets[i+1:], l.packets[i:])
+			l.packets[i] = pkt
+			if l.slot < len(l.packets) {
+				l.slot++
+			}
+			return
+		}
+	}
+}
+
+func (l *packetList) LowestSeq() uint32 {
+	return l.packets[0].hdr.sequenceNo
+}
+
+func (l *packetList) PopSequence() []packet {
+	highSeq := l.packets[0].hdr.sequenceNo
+	var i int
+	for i = 1; i < l.slot; i++ {
+		if l.packets[i].hdr.sequenceNo != highSeq+1 {
+			break
+		}
+		highSeq++
+	}
+	pkts := make([]packet, i)
+	copy(pkts, l.packets[:i])
+	l.Cut(i)
+	return pkts
+}

@@ -86,7 +86,7 @@ func (b *sendBuffer) Acknowledge(seq uint32) {
 	b.mut.Lock()
 
 	if cut := b.lost.CutLessSeq(seq); cut > 0 {
-		b.lostSendSlot -= cut
+		b.lostSendSlot = 0
 		b.cond.Broadcast()
 	}
 
@@ -150,7 +150,10 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 
 // Stop stops the send buffer from any doing further sending.
 func (b *sendBuffer) Stop() {
+	b.mut.Lock()
 	close(b.closed)
+	b.cond.Broadcast()
+	b.mut.Unlock()
 }
 
 func (b *sendBuffer) String() string {
@@ -182,6 +185,9 @@ func (b *sendBuffer) writerLoop() {
 		}
 
 		if b.lostSendSlot < b.lost.Len() {
+			if debugConnection {
+				log.Println("resend", b.lostSendSlot, b.lost.Len())
+			}
 			pkt = b.lost.All()[b.lostSendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.lostSendSlot++

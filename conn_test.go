@@ -263,11 +263,15 @@ func TestLargeDataLossy(t *testing.T) {
 		t.Error(bErr)
 	}
 	if data := buf[:n]; bytes.Compare(data, src) != 0 {
-		t.Errorf("Incorrect data % x != % x", data[:16], src[:16])
+		t.Errorf("Incorrect data\n  % x...% x (%d) !=\n  % x...% x (%d)", data[:8], data[len(data)-8:], len(data), src[:8], src[len(src)-8:], len(src))
 	}
 }
 
-func TestTLSOnTop(t *testing.T) {
+func TestTLSOnTopOfLossy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow test")
+	}
+
 	keypair, err := tls.LoadX509KeyPair("testdata/cert.pem", "testdata/key.pem")
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +285,7 @@ func TestTLSOnTop(t *testing.T) {
 		InsecureSkipVerify: true,
 	}
 
-	a, b, err := connPair(0, 0)
+	a, b, err := connPair(0.001, 0.001)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,14 +293,10 @@ func TestTLSOnTop(t *testing.T) {
 	client := tls.Client(b, clientConfig)
 	server := tls.Server(a, serverConfig)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	errors := make(chan error)
+
 	go func() {
-		defer wg.Done()
-		err := server.Handshake()
-		if err != nil {
-			t.Error(err)
-		}
+		errors <- server.Handshake()
 	}()
 
 	err = client.Handshake()
@@ -304,7 +304,45 @@ func TestTLSOnTop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wg.Wait()
+	err = <-errors
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			_, err := client.Read(buf)
+			if err == io.EOF {
+				errors <- nil
+				return
+			} else if err != nil {
+				errors <- err
+				return
+			}
+		}
+	}()
+
+	go func() {
+		t0 := time.Now()
+		buf := make([]byte, 65536)
+		for time.Since(t0) < 30*time.Second {
+			_, err := server.Write(buf)
+			if err != nil {
+				errors <- err
+			}
+		}
+		errors <- nil
+	}()
+
+	err = <-errors
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = <-errors
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTimeoutCloseWrite(t *testing.T) {
@@ -317,8 +355,15 @@ func TestTimeoutCloseWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sneakily stop responding on the server side
-	b.mux.conn.Close()
+	go func() {
+		t0 := time.Now()
+		buf := make([]byte, 65536)
+		for time.Since(t0) < 5*time.Second {
+			b.Read(buf)
+		}
+		// Sneakily stop responding on the server side
+		b.mux.conn.Close()
+	}()
 
 	for {
 		_, err := a.Write([]byte("stuff to write"))

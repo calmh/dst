@@ -64,6 +64,7 @@ type Conn struct {
 	inbufCond *sync.Cond
 
 	sendBuffer *sendBuffer
+	recvBuffer packetList
 
 	exp    *time.Timer
 	expMut sync.Mutex
@@ -98,12 +99,13 @@ type Conn struct {
 
 	debugResetRecvSeqNo chan uint32
 
-	packetsIn      uint64
-	packetsOut     uint64
-	bytesIn        uint64
-	bytesOut       uint64
-	resentPackets  uint64
-	droppedPackets uint64
+	packetsIn         uint64
+	packetsOut        uint64
+	bytesIn           uint64
+	bytesOut          uint64
+	resentPackets     uint64
+	droppedPackets    uint64
+	outOfOrderPackets uint64
 }
 
 type ackTimestamp struct {
@@ -133,6 +135,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 
 	conn.cc = NewWindowCC()
 	conn.sendBuffer.SetWindowAndRate(conn.cc.SendWindow(), conn.cc.PacketRate())
+	conn.recvBuffer.Resize(128)
 
 	return conn
 }
@@ -318,41 +321,54 @@ func (c *Conn) recvdShutdown(pkt packet) {
 }
 
 func (c *Conn) recvdData(pkt packet) {
-	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
-		// An in-sequence packet.
-
-		c.nextRecvSeqNo = pkt.hdr.sequenceNo + uint32(len(pkt.data))
-		c.rcvdUnacked++
-
-		if c.rcvdUnacked >= c.cc.AckPacketIntv() {
-			c.sendACK()
-		}
-
-		s := 0
-		for {
-			c.inbufMut.Lock()
-			n := c.inbuf.Write(pkt.data[s:])
-			s += n
-			c.inbufCond.Broadcast()
-			if len(pkt.data[s:]) > 0 {
-				c.inbufCond.Wait()
-				continue
-			} else {
-				c.inbufMut.Unlock()
-				break
-			}
-		}
-	} else if diff := pkt.hdr.sequenceNo - c.nextRecvSeqNo; diff > 1<<30 {
+	if pkt.LessSeq(c.nextRecvSeqNo) {
 		if debugConnection {
 			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
 		c.rcvdUnacked++
 		atomic.AddUint64(&c.droppedPackets, 1)
+		return
+	}
+
+	if debugConnection {
+		log.Println(c, "into recv buffer:", pkt)
+	}
+	c.recvBuffer.InsertSorted(pkt)
+	if c.recvBuffer.LowestSeq() == c.nextRecvSeqNo {
+		for _, pkt := range c.recvBuffer.PopSequence() {
+			if debugConnection {
+				log.Println(c, "from recv buffer:", pkt)
+			}
+			// An in-sequence packet.
+
+			c.nextRecvSeqNo = pkt.hdr.sequenceNo + 1
+			c.rcvdUnacked++
+
+			if c.rcvdUnacked >= c.cc.AckPacketIntv() {
+				c.sendACK()
+			}
+
+			s := 0
+			for {
+				c.inbufMut.Lock()
+				n := c.inbuf.Write(pkt.data[s:])
+				s += n
+				c.inbufCond.Broadcast()
+				if len(pkt.data[s:]) > 0 {
+					c.inbufCond.Wait()
+					continue
+				} else {
+					c.inbufMut.Unlock()
+					break
+				}
+			}
+		}
 	} else {
+		c.recvBuffer.InsertSorted(pkt)
 		if debugConnection {
 			log.Printf("%v lost; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
-		atomic.AddUint64(&c.droppedPackets, 1)
+		atomic.AddUint64(&c.outOfOrderPackets, 1)
 	}
 }
 
@@ -462,7 +478,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			},
 			data: sliceCopy,
 		}
-		c.nextSeqNo += uint32(len(slice))
+		c.nextSeqNo++
 		c.nextSeqNoMut.Unlock()
 
 		c.sendBuffer.Write(pkt)
@@ -529,21 +545,28 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 }
 
 type Statistics struct {
-	DataPacketsIn  uint64
-	DataPacketsOut uint64
-	DataBytesIn    uint64
-	DataBytesOut   uint64
-	ResentPackets  uint64
-	DroppedPackets uint64
+	DataPacketsIn     uint64
+	DataPacketsOut    uint64
+	DataBytesIn       uint64
+	DataBytesOut      uint64
+	ResentPackets     uint64
+	DroppedPackets    uint64
+	OutOfOrderPackets uint64
+}
+
+func (s Statistics) String() string {
+	return fmt.Sprintf("PktsIn: %d, PktsOut: %d, BytesIn: %d, BytesOut: %d, PktsResent: %d, PktsDropped: %d, PktsOutOfOrder: %d",
+		s.DataPacketsIn, s.DataPacketsOut, s.DataBytesIn, s.DataBytesOut, s.ResentPackets, s.DroppedPackets, s.OutOfOrderPackets)
 }
 
 func (c *Conn) GetStatistics() Statistics {
 	return Statistics{
-		DataPacketsIn:  atomic.LoadUint64(&c.packetsIn),
-		DataPacketsOut: atomic.LoadUint64(&c.packetsOut),
-		DataBytesIn:    atomic.LoadUint64(&c.bytesIn),
-		DataBytesOut:   atomic.LoadUint64(&c.bytesOut),
-		ResentPackets:  atomic.LoadUint64(&c.resentPackets),
-		DroppedPackets: atomic.LoadUint64(&c.droppedPackets),
+		DataPacketsIn:     atomic.LoadUint64(&c.packetsIn),
+		DataPacketsOut:    atomic.LoadUint64(&c.packetsOut),
+		DataBytesIn:       atomic.LoadUint64(&c.bytesIn),
+		DataBytesOut:      atomic.LoadUint64(&c.bytesOut),
+		ResentPackets:     atomic.LoadUint64(&c.resentPackets),
+		DroppedPackets:    atomic.LoadUint64(&c.droppedPackets),
+		OutOfOrderPackets: atomic.LoadUint64(&c.outOfOrderPackets),
 	}
 }
