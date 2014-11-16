@@ -129,20 +129,17 @@ func TestIntegrationSlowTransfer(t *testing.T) {
 
 	echoServer := func(c net.Conn) {
 		buf := make([]byte, 1024)
-		n, err := c.Read(buf)
-		if err != nil {
-			errors <- err
-			return
-		}
-		_, err = c.Write(buf[:n])
-		if err != nil {
-			errors <- err
-			return
-		}
-		err = c.Close()
-		if err != nil {
-			errors <- err
-			return
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				errors <- err
+				return
+			}
+			_, err = c.Write(buf[:n])
+			if err != nil {
+				errors <- err
+				return
+			}
 		}
 	}
 
@@ -195,6 +192,8 @@ func TestIntegrationSlowTransfer(t *testing.T) {
 	if bytes.Compare(msg, buf[:n]) != 0 {
 		t.Fatalf("Incorrect message content")
 	}
+
+	// Give things time to stall or time out, possibly
 
 	time.Sleep(45 * time.Second)
 

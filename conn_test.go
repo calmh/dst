@@ -152,7 +152,10 @@ func TestClosedReadWrite(t *testing.T) {
 		t.Error("Unexpected non-EOF error", err)
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	// Time for shutdown packets to pass and linger to occur.
+
+	time.Sleep(500 * time.Millisecond)
+
 	// b should also have closed
 
 	_, err = b.Write([]byte("something"))
@@ -230,7 +233,7 @@ func TestLargeData(t *testing.T) {
 		t.Error(bErr)
 	}
 	if data := buf[:n]; bytes.Compare(data, src) != 0 {
-		t.Errorf("Incorrect data % x != % x", data[:16], src[:16])
+		t.Errorf("Incorrect data\n  % x...% x (%d) !=\n  % x...% x (%d)", data[:8], data[len(data)-8:], len(data), src[:8], src[len(src)-8:], len(src))
 	}
 }
 
@@ -321,17 +324,20 @@ func TestTLSOnTopOfLossy(t *testing.T) {
 				return
 			}
 		}
+		client.Close()
 	}()
 
 	go func() {
 		t0 := time.Now()
 		buf := make([]byte, 65536)
-		for time.Since(t0) < 30*time.Second {
+		for time.Since(t0) < 10*time.Second {
 			_, err := server.Write(buf)
 			if err != nil {
 				errors <- err
 			}
 		}
+
+		server.Close()
 		errors <- nil
 	}()
 

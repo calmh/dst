@@ -200,10 +200,6 @@ func (c *Conn) reader() {
 				continue
 			}
 
-			if len(pkt.data) > 0 {
-				c.mux.buffers.Put(pkt.data)
-			}
-
 		case <-c.exp.C:
 			c.eventEXP()
 			c.resetExp()
@@ -221,15 +217,19 @@ func (c *Conn) reader() {
 }
 
 func (c *Conn) eventEXP() {
+	c.expCount++
+
 	resent := c.sendBuffer.ScheduleResend()
 	if resent {
 		c.cc.Exp()
 		c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
-	}
 
-	c.expCount++
-	if resent && c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
-		c.Close()
+		if c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
+			if debugConnection {
+				log.Println(c, "close due to EXP")
+			}
+			c.Close()
+		}
 	}
 }
 
@@ -265,8 +265,6 @@ func (c *Conn) recvdACK(pkt packet) {
 
 	c.cc.Ack()
 	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
-
-	c.resetExp()
 }
 
 func (c *Conn) recvdACK2(pkt packet) {
@@ -316,6 +314,9 @@ func (c *Conn) recvdKeepAlive(pkt packet) {
 
 func (c *Conn) recvdShutdown(pkt packet) {
 	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
+		if debugConnection {
+			log.Println(c, "close due to shutdown")
+		}
 		c.Close()
 	}
 }
@@ -339,6 +340,7 @@ func (c *Conn) recvdData(pkt packet) {
 			if debugConnection {
 				log.Println(c, "from recv buffer:", pkt)
 			}
+
 			// An in-sequence packet.
 
 			c.nextRecvSeqNo = pkt.hdr.sequenceNo + 1
@@ -349,19 +351,25 @@ func (c *Conn) recvdData(pkt packet) {
 			}
 
 			s := 0
-			for {
-				c.inbufMut.Lock()
+			c.inbufMut.Lock()
+			for len(pkt.data[s:]) > 0 {
 				n := c.inbuf.Write(pkt.data[s:])
+				// n is < len(pkt.data[s:]) if the ringbuf is full only.
+
 				s += n
 				c.inbufCond.Broadcast()
+
 				if len(pkt.data[s:]) > 0 {
 					c.inbufCond.Wait()
-					continue
-				} else {
-					c.inbufMut.Unlock()
-					break
+				}
+
+				select {
+				case <-c.closed:
+					return
+				default:
 				}
 			}
+			c.inbufMut.Unlock()
 		}
 	} else {
 		c.recvBuffer.InsertSorted(pkt)
@@ -493,9 +501,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
+		// XXX: Ugly hack to implement lingering sockets...
+		time.Sleep(4 * defExpTime)
+
 		c.sendBuffer.Stop()
 		c.mux.removeConn(c)
 		close(c.closed)
+
 		c.inbufMut.Lock()
 		c.inbufCond.Broadcast()
 		c.inbufMut.Unlock()
