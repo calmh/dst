@@ -26,7 +26,7 @@ var debugWindowCC = strings.Contains(os.Getenv("DSTDEBUG"), "windowcc")
 
 func NewWindowCC() *WindowCC {
 	return &WindowCC{
-		minWindow:     8,
+		minWindow:     2,
 		maxWindow:     4096,
 		currentWindow: 16,
 

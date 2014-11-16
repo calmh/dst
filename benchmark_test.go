@@ -7,31 +7,75 @@ package dst
 import (
 	"crypto/rand"
 	"io"
+	"net"
 	"testing"
 )
 
 func BenchmarkDST(b *testing.B) {
-	benchmarkWithLoss(b, 0)
-}
-
-func Benchmark0p0001Loss(b *testing.B) {
-	benchmarkWithLoss(b, 0.0001)
-}
-
-func Benchmark0p001Loss(b *testing.B) {
-	benchmarkWithLoss(b, 0.001)
-}
-
-func Benchmark0p01Loss(b *testing.B) {
-	benchmarkWithLoss(b, 0.01)
-}
-
-func benchmarkWithLoss(b *testing.B, loss float64) {
-	aConn, bConn, err := connPair(loss, 0)
+	aConn, bConn, err := connPair(0, 0)
 	if err != nil {
 		b.Fatal(err)
 	}
+	benchmarkConns(b, aConn, bConn)
+}
 
+func BenchmarkConstantLoss100ppm(b *testing.B) {
+	aConn, bConn, err := connPair(100/1e6, 100/1e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkConstantLoss1000ppm(b *testing.B) {
+	aConn, bConn, err := connPair(1000/1e6, 1000/1e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkConstantLoss10000ppm(b *testing.B) {
+	aConn, bConn, err := connPair(10000/1e6, 10000/1e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkLimited128KBps(b *testing.B) {
+	aConn, bConn, err := limitedConnPair(128e3, 128e3)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkLimited1MBps(b *testing.B) {
+	aConn, bConn, err := limitedConnPair(1e6, 1e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkLimited10MBps(b *testing.B) {
+	aConn, bConn, err := limitedConnPair(10e6, 10e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func BenchmarkLimited50MBps(b *testing.B) {
+	aConn, bConn, err := limitedConnPair(50e6, 50e6)
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConns(b, aConn, bConn)
+}
+
+func benchmarkConns(b *testing.B, aConn, bConn net.Conn) {
 	src := make([]byte, 65536)
 	io.ReadFull(rand.Reader, src)
 

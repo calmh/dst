@@ -9,6 +9,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/juju/ratelimit"
 )
 
 func connPair(aLoss, bLoss float64) (*Conn, *Conn, error) {
@@ -17,6 +19,40 @@ func connPair(aLoss, bLoss float64) (*Conn, *Conn, error) {
 		return nil, nil, err
 	}
 	mpB, err := newLossyMux(bLoss)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Dial
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var otherErr error
+	var otherConn *Conn
+	go func() {
+		defer wg.Done()
+		otherConn, otherErr = mpB.AcceptUDT()
+	}()
+
+	conn, err := mpA.DialUDT("dst", mpB.Addr().String())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	wg.Wait()
+	if otherErr != nil {
+		return nil, nil, otherErr
+	}
+
+	return conn, otherConn, nil
+}
+
+func limitedConnPair(aRate, bRate int64) (*Conn, *Conn, error) {
+	mpA, err := newLimitedMux(aRate)
+	if err != nil {
+		return nil, nil, err
+	}
+	mpB, err := newLimitedMux(bRate)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -92,6 +128,23 @@ func newLossyMux(loss float64) (*Mux, error) {
 	return NewMux(conn, 0), nil
 }
 
+func newLimitedMux(rate int64) (*Mux, error) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		return nil, err
+	}
+
+	if rate > 0 {
+		mp := NewMux(&LimitedPacketConn{
+			limiter: ratelimit.NewBucketWithRate(float64(rate), rate/4),
+			conn:    conn,
+		}, 0)
+		return mp, nil
+	}
+
+	return NewMux(conn, 0), nil
+}
+
 type LossyPacketConn struct {
 	lossProbability float64
 	conn            net.PacketConn
@@ -125,5 +178,42 @@ func (c *LossyPacketConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *LossyPacketConn) SetWriteDeadline(t time.Time) error {
+	return c.conn.SetWriteDeadline(t)
+}
+
+type LimitedPacketConn struct {
+	limiter *ratelimit.Bucket
+	conn    net.PacketConn
+}
+
+func (c *LimitedPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
+	return c.conn.ReadFrom(b)
+}
+
+func (c *LimitedPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
+	if delay := c.limiter.Take(int64(len(b))); delay > 100*time.Millisecond {
+		// Queue size exceeded, packet dropped
+		return len(b), nil
+	}
+	return c.conn.WriteTo(b, addr)
+}
+
+func (c *LimitedPacketConn) Close() error {
+	return c.conn.Close()
+}
+
+func (c *LimitedPacketConn) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *LimitedPacketConn) SetDeadline(t time.Time) error {
+	return c.conn.SetDeadline(t)
+}
+
+func (c *LimitedPacketConn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *LimitedPacketConn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
