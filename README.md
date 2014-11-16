@@ -9,6 +9,20 @@ DST is the Datagram Stream Transfer protocol. In principle it's yet
 another way to provide a reliable stream protocol on top of UDP, similar
 to uTP, RUDP, and UDT.
 
+In fact, it's mostly based on UDT with some significant differences;
+
+ - The packet format is simplified.
+
+ - The keepalive mechanism has been removed to reduce complexity and
+   bandwidth use. Applications can perform keepalives as desired.
+
+ - Windowing and congestion control is simpler, with room for
+   future improvement.
+
+There's currently no protocol specification document apart from the
+code. One will be written once it's proven to work and the formats can
+be locked down.
+
 Documentation
 -------------
 
