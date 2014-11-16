@@ -310,7 +310,7 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 		// A new incoming handshake request.
 
 		if hdr.flags&flagRequest != flagRequest {
-			log.Println("Handshake pattern with flags 0x%x to connID zero", hdr.flags)
+			log.Printf("Handshake pattern with flags 0x%x to connID zero", hdr.flags)
 			return
 		}
 

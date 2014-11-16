@@ -324,7 +324,6 @@ func TestTLSOnTopOfLossy(t *testing.T) {
 				return
 			}
 		}
-		client.Close()
 	}()
 
 	go func() {
