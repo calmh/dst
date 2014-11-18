@@ -32,7 +32,7 @@ type sendBuffer struct {
 	lost         packetList // list of packets reported lost by timeout
 	lostSendSlot int        // next lost packet to resend
 
-	closed chan struct{}
+	closed bool
 	mut    sync.Mutex
 	cond   *sync.Cond
 }
@@ -49,7 +49,6 @@ func newSendBuffer(m *Mux) *sendBuffer {
 	b := &sendBuffer{
 		mux:       m,
 		scheduler: ratelimit.NewBucketWithRate(schedulerRate, schedulerCapacity),
-		closed:    make(chan struct{}),
 	}
 	b.cond = sync.NewCond(&b.mut)
 	go b.writerLoop()
@@ -63,15 +62,13 @@ func (b *sendBuffer) Write(pkt packet) error {
 	defer b.mut.Unlock()
 
 	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
-		select {
-		case <-b.closed:
+		if b.closed {
 			return ErrClosed
-		default:
-			if debugConnection {
-				log.Println(b, "Write blocked")
-			}
-			b.cond.Wait()
 		}
+		if debugConnection {
+			log.Println(b, "Write blocked")
+		}
+		b.cond.Wait()
 	}
 	if !b.buffer.Append(pkt) {
 		panic("bug: append failed")
@@ -151,7 +148,7 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 // Stop stops the send buffer from any doing further sending.
 func (b *sendBuffer) Stop() {
 	b.mut.Lock()
-	close(b.closed)
+	b.closed = true
 	b.cond.Broadcast()
 	b.mut.Unlock()
 }
@@ -172,11 +169,9 @@ func (b *sendBuffer) writerLoop() {
 		b.mut.Lock()
 		for b.lostSendSlot >= b.sendWindow ||
 			(b.sendSlot == b.buffer.Len() && b.lostSendSlot == b.lost.Len()) {
-			select {
-			case <-b.closed:
+			if b.closed {
 				b.mut.Unlock()
 				return
-			default:
 			}
 
 			if debugConnection {
