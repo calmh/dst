@@ -118,7 +118,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 	conn := &Conn{
 		mux:                 m,
 		dst:                 dst,
-		nextSeqNo:           uint32(rand.Int31()),
+		nextSeqNo:           rand.Uint32(),
 		packetSize:          maxPacketSize,
 		in:                  make(chan packet, 1024),
 		closed:              make(chan struct{}),
@@ -313,7 +313,11 @@ func (c *Conn) recvdKeepAlive(pkt packet) {
 }
 
 func (c *Conn) recvdShutdown(pkt packet) {
-	if pkt.hdr.sequenceNo == c.nextRecvSeqNo {
+	// XXX: We accept shutdown packets somewhat from the future since the
+	// sender will number the shutdown after any packets that might still be
+	// in the write buffer. This should be fixed to let the write buffer empty
+	// on close and reduce the window here.
+	if pkt.LessSeq(c.nextRecvSeqNo + 128) {
 		if debugConnection {
 			log.Println(c, "close due to shutdown")
 		}
@@ -489,7 +493,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		c.nextSeqNo++
 		c.nextSeqNoMut.Unlock()
 
-		c.sendBuffer.Write(pkt)
+		if err := c.sendBuffer.Write(pkt); err != nil {
+			return sent, err
+		}
 
 		sent += len(slice)
 		c.resetExp()

@@ -58,26 +58,26 @@ func newSendBuffer(m *Mux) *sendBuffer {
 
 // Write puts a new packet in send buffer and schedules a send. Blocks when
 // the window size is or would be exceeded.
-func (b *sendBuffer) Write(pkt packet) {
+func (b *sendBuffer) Write(pkt packet) error {
 	b.mut.Lock()
+	defer b.mut.Unlock()
+
 	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
-		if debugConnection {
-			log.Println(b, "Write blocked")
-		}
-		b.cond.Wait()
-		// Connection may have closed while we were waiting
 		select {
 		case <-b.closed:
-			b.mut.Unlock()
-			return
+			return ErrClosed
 		default:
+			if debugConnection {
+				log.Println(b, "Write blocked")
+			}
+			b.cond.Wait()
 		}
 	}
 	if !b.buffer.Append(pkt) {
 		panic("bug: append failed")
 	}
 	b.cond.Broadcast()
-	b.mut.Unlock()
+	return nil
 }
 
 // Acknowledge removes packets with lower sequence numbers from the loss list
@@ -174,6 +174,7 @@ func (b *sendBuffer) writerLoop() {
 			(b.sendSlot == b.buffer.Len() && b.lostSendSlot == b.lost.Len()) {
 			select {
 			case <-b.closed:
+				b.mut.Unlock()
 				return
 			default:
 			}
