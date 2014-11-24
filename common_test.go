@@ -191,7 +191,7 @@ func (c *LimitedPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 }
 
 func (c *LimitedPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	if delay := c.limiter.Take(int64(len(b))); delay > 100*time.Millisecond {
+	if _, ok := c.limiter.TakeMaxDuration(int64(len(b)), 100*time.Millisecond); !ok {
 		// Queue size exceeded, packet dropped
 		return len(b), nil
 	}
