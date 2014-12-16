@@ -28,7 +28,6 @@ const (
 	typeHandshake            = 0x1
 	typeKeepAlive            = 0x2
 	typeACK                  = 0x3
-	typeACK2                 = 0x4
 	typeNAK                  = 0x5
 	typeShutdown             = 0x6
 )
@@ -43,8 +42,6 @@ func (t packetType) String() string {
 		return "keepalive"
 	case typeACK:
 		return "ack"
-	case typeACK2:
-		return "ack2"
 	case typeNAK:
 		return "nak"
 	case typeShutdown:

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 type WindowCC struct {
@@ -18,8 +19,8 @@ type WindowCC struct {
 	maxRate       int
 	currentRate   int
 
-	curPPS int
-	curRTT int // microseconds
+	curRTT time.Duration
+	minRTT time.Duration
 }
 
 var debugWindowCC = strings.Contains(os.Getenv("DSTDEBUG"), "windowcc")
@@ -33,6 +34,8 @@ func NewWindowCC() *WindowCC {
 		minRate:     100,
 		maxRate:     200e3,
 		currentRate: 100,
+
+		minRTT: 10 * time.Second,
 	}
 }
 
@@ -55,11 +58,8 @@ func (w *WindowCC) Ack() {
 		w.currentRate = w.currentRate * 3 / 2
 		changed = true
 	} else if w.currentRate < w.maxRate {
-		w.currentRate += w.maxRate / 1000
+		w.currentRate += w.minRate
 		changed = true
-	}
-	if w.curPPS > 0 && w.currentRate > w.curPPS*4/3 {
-		w.currentRate = w.curPPS * 4 / 3
 	}
 
 	if changed && debugWindowCC {
@@ -87,10 +87,6 @@ func (w *WindowCC) SendWindow() int {
 	return w.currentWindow
 }
 
-func (w *WindowCC) AckPacketIntv() int {
-	return 1e6
-}
-
 func (w *WindowCC) PacketRate() int {
 	if w.currentRate < w.minRate {
 		return w.minRate
@@ -101,16 +97,26 @@ func (w *WindowCC) PacketRate() int {
 	return w.currentRate
 }
 
-func (w *WindowCC) RTTPPS(rtt, pps int) {
-	w.curRTT = (w.curRTT*7 + rtt) / 8
-	w.curPPS = (w.curPPS*7 + pps) / 8
+func (w *WindowCC) UpdateRTT(rtt time.Duration) {
+	w.curRTT = rtt
+	if w.curRTT < w.minRTT {
+		w.minRTT = w.curRTT
+		if debugWindowCC {
+			log.Println("Min RTT", w.minRTT)
+		}
+	}
 
-	if w.curRTT > 100000 {
-		w.maxRate = w.curPPS
-		w.currentRate = w.curPPS
+	if w.curRTT > w.minRTT+100*time.Millisecond {
+		// RTT increased 100ms over minimum
+		w.currentRate = w.currentRate * 7 / 8
+		w.maxRate = w.currentRate * 3 / 2
+		w.minRTT = w.curRTT
+		if debugWindowCC {
+			log.Println("Nailing rate", w.currentRate, w.maxRate)
+		}
 	}
 
 	if debugWindowCC {
-		log.Println("RTT PPS", w.curRTT, w.curPPS)
+		log.Println("RTT", w.curRTT)
 	}
 }

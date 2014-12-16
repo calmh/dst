@@ -5,27 +5,25 @@
 package dst
 
 import (
-	"encoding/binary"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/juju/ratelimit"
-
-	"code.google.com/p/curvecp/ringbuf"
 )
 
 const (
-	defExpTime    = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	defSynTime    = 10 * time.Millisecond
-	expCountClose = 16               // close connection after this many EXPs
-	minTimeClose  = 15 * time.Second // if at least this long has passed
+	defExpTime     = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
+	defSynTime     = 10 * time.Millisecond
+	expCountClose  = 16               // close connection after this many EXPs
+	minTimeClose   = 15 * time.Second // if at least this long has passed
+	maxInputBuffer = 8192 * 1024
 
 	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
@@ -38,9 +36,8 @@ type CongestionController interface {
 	Ack()
 	Exp()
 	SendWindow() int
-	AckPacketIntv() int
-	PacketRate() int
-	RTTPPS(int, int)
+	PacketRate() int // PPS
+	UpdateRTT(time.Duration)
 }
 
 // Conn is an SDT connection carried over a Mux.
@@ -59,7 +56,7 @@ type Conn struct {
 	nextSeqNo    uint32
 	nextSeqNoMut sync.Mutex
 
-	inbuf     *ringbuf.Ringbuf
+	inbuf     bytes.Buffer
 	inbufMut  sync.Mutex
 	inbufCond *sync.Cond
 
@@ -74,15 +71,9 @@ type Conn struct {
 
 	packetSize int
 
-	ackSent     []ackTimestamp // timestamps of the last transmitted ACKs
-	nextAckSent int            // index to write next timestamp at
-	avgRTT      int            // microseconds
-	avgPPS      int
-	rttMut      sync.Mutex
+	sentPackets *timeBuffer
 
 	// Only touched by the reader routine, needs no locking
-
-	rcvdUnacked int
 
 	nextRecvSeqNo  uint32
 	lastAckedSeqNo uint32
@@ -122,8 +113,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 		packetSize:          maxPacketSize,
 		in:                  make(chan packet, 1024),
 		closed:              make(chan struct{}),
-		ackSent:             make([]ackTimestamp, 16),
-		inbuf:               ringbuf.New(8192 * 1024),
+		sentPackets:         NewTimeBuffer(32),
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		syn:                 time.NewTimer(defSynTime),
@@ -154,9 +144,8 @@ func (c *Conn) reader() {
 		select {
 		case <-c.closed:
 			// Ack any received but not yet acked messages.
-			if c.rcvdUnacked > 0 {
-				c.sendACK()
-			}
+			c.sendACK()
+
 			// Send a shutdown message.
 			c.nextSeqNoMut.Lock()
 			c.mux.write(packet{
@@ -191,8 +180,6 @@ func (c *Conn) reader() {
 				c.recvdKeepAlive(pkt)
 			case typeACK:
 				c.recvdACK(pkt)
-			case typeACK2:
-				c.recvdACK2(pkt)
 			case typeShutdown:
 				c.recvdShutdown(pkt)
 			default:
@@ -234,79 +221,26 @@ func (c *Conn) eventEXP() {
 }
 
 func (c *Conn) eventSYN() {
-	if c.rcvdUnacked > 0 {
-		c.sendACK()
-	}
+	c.sendACK()
 }
 
 func (c *Conn) recvdACK(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 
-	data := make([]byte, 8)
-	binary.BigEndian.PutUint32(data, uint32(c.avgRTT))
-	binary.BigEndian.PutUint32(data[4:], uint32(c.avgPPS))
-
-	c.mux.write(packet{
-		src: c.connID,
-		dst: c.dst,
-		hdr: header{
-			packetType: typeACK2,
-			connID:     c.remoteConnID,
-			sequenceNo: ack,
-		},
-		data: data,
-	})
-
 	if debugConnection {
 		log.Printf("%v read ACK 0x%08x", c, ack)
 	}
 
+	c.sentPackets.Recv(ack)
 	c.sendBuffer.Acknowledge(ack)
 
 	c.cc.Ack()
+	rtt, n := c.sentPackets.Average()
+	if n > 8 {
+		c.cc.UpdateRTT(rtt)
+	}
+
 	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
-}
-
-func (c *Conn) recvdACK2(pkt packet) {
-	ack := pkt.hdr.sequenceNo
-	now := time.Now().UnixNano() / 1000
-
-	if len(pkt.data) == 8 {
-		remoteRTT := int(binary.BigEndian.Uint32(pkt.data))
-		remotePPS := int(binary.BigEndian.Uint32(pkt.data[4:]))
-		c.cc.RTTPPS(remoteRTT, remotePPS)
-	}
-
-	c.rttMut.Lock()
-	for _, ts := range c.ackSent {
-		if ts.sequenceNo == ack {
-			diff := int(now - ts.time)
-			c.avgRTT = (c.avgRTT/8)*7 + diff
-			break
-		}
-	}
-
-	var pps []int
-	prev := c.ackSent[0]
-	for _, ts := range c.ackSent[1:] {
-		if diff := ts.time - prev.time; diff > 0 {
-			packets := ts.packets - prev.packets
-			if packets < 20 {
-				continue
-			}
-			// time difference is in microseconds
-			rate := int(float64(1e6*packets) / float64(diff))
-			pps = append(pps, rate)
-		}
-		prev = ts
-	}
-
-	if len(pps) > len(c.ackSent)/2 {
-		sort.Ints(pps)
-		c.avgPPS = pps[len(pps)/2]
-	}
-
-	c.rttMut.Unlock()
 }
 
 func (c *Conn) recvdKeepAlive(pkt packet) {
@@ -330,7 +264,6 @@ func (c *Conn) recvdData(pkt packet) {
 		if debugConnection {
 			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
-		c.rcvdUnacked++
 		atomic.AddUint64(&c.droppedPackets, 1)
 		return
 	}
@@ -348,31 +281,21 @@ func (c *Conn) recvdData(pkt packet) {
 			// An in-sequence packet.
 
 			c.nextRecvSeqNo = pkt.hdr.sequenceNo + 1
-			c.rcvdUnacked++
 
-			if c.rcvdUnacked >= c.cc.AckPacketIntv() {
-				c.sendACK()
-			}
+			c.sendACK()
 
-			s := 0
 			c.inbufMut.Lock()
-			for len(pkt.data[s:]) > 0 {
-				n := c.inbuf.Write(pkt.data[s:])
-				// n is < len(pkt.data[s:]) if the ringbuf is full only.
-
-				s += n
-				c.inbufCond.Broadcast()
-
-				if len(pkt.data[s:]) > 0 {
-					c.inbufCond.Wait()
-				}
-
+			for c.inbuf.Len() > len(pkt.data)+maxInputBuffer {
+				c.inbufCond.Wait()
 				select {
 				case <-c.closed:
 					return
 				default:
 				}
 			}
+
+			c.inbuf.Write(pkt.data)
+			c.inbufCond.Broadcast()
 			c.inbufMut.Unlock()
 		}
 	} else {
@@ -385,7 +308,10 @@ func (c *Conn) recvdData(pkt packet) {
 }
 
 func (c *Conn) sendACK() {
-	now := time.Now().UnixNano() / 1000
+	if c.lastAckedSeqNo == c.nextRecvSeqNo {
+		return
+	}
+
 	c.mux.write(packet{
 		src: c.connID,
 		dst: c.dst,
@@ -396,30 +322,19 @@ func (c *Conn) sendACK() {
 		},
 	})
 
-	c.rttMut.Lock()
-	c.ackSent[c.nextAckSent] = ackTimestamp{
-		sequenceNo: c.nextRecvSeqNo,
-		time:       now,
-		packets:    atomic.LoadUint64(&c.packetsIn),
-	}
-	c.nextAckSent = (c.nextAckSent + 1) % len(c.ackSent)
-	c.rttMut.Unlock()
-
 	atomic.AddUint64(&c.packetsOut, 1)
 	atomic.AddUint64(&c.bytesOut, dstHeaderLen)
 	if debugConnection {
-		log.Printf("%v ACK 0x%08x", c, c.nextRecvSeqNo)
+		log.Printf("%v send ACK 0x%08x", c, c.nextRecvSeqNo)
 	}
 
-	c.rcvdUnacked = 0
 	c.lastAckedSeqNo = c.nextRecvSeqNo
-	c.lastAckedSeqNo &= uint32(1<<31 - 1)
 }
 
 func (c *Conn) resetExp() {
-	c.rttMut.Lock()
-	d := time.Duration(c.avgRTT*4)*1000 + defSynTime
-	c.rttMut.Unlock()
+	d, _ := c.sentPackets.Average()
+	d *= 4
+	d += defSynTime
 
 	if d < defExpTime {
 		d = defExpTime
@@ -447,7 +362,7 @@ func (c *Conn) String() string {
 func (c *Conn) Read(b []byte) (n int, err error) {
 	c.inbufMut.Lock()
 	defer c.inbufMut.Unlock()
-	for c.inbuf.Size() == 0 {
+	for c.inbuf.Len() == 0 {
 		select {
 		case <-c.closed:
 			return 0, io.EOF
@@ -455,7 +370,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		}
 		c.inbufCond.Wait()
 	}
-	return c.inbuf.Read(b), nil
+	return c.inbuf.Read(b)
 }
 
 // Write writes data to the connection.
@@ -496,6 +411,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		if err := c.sendBuffer.Write(pkt); err != nil {
 			return sent, err
 		}
+
+		c.sentPackets.Sent(pkt.hdr.sequenceNo)
+
+		atomic.AddUint64(&c.packetsOut, 1)
+		atomic.AddUint64(&c.bytesOut, uint64(len(slice)+dstHeaderLen))
 
 		sent += len(slice)
 		c.resetExp()
