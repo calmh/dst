@@ -10,12 +10,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/calmh/dst"
 )
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	flag.Parse()
 
 	sock, err := net.ListenUDP("udp", &net.UDPAddr{})
@@ -24,50 +26,58 @@ func main() {
 	}
 
 	mux := dst.NewMux(sock, 0)
-	log.Println(mux.Addr())
-
-	go func() {
-		for {
-			conn, err := mux.Accept()
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Println(conn)
-			go test(conn)
-		}
-	}()
 
 	if flag.NArg() > 0 {
 		conn, err := mux.Dial("dst", flag.Arg(0))
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println(conn)
-		go test(conn)
+		log.Println("Connected to", conn)
+		test(conn)
+		return
+	} else {
+		log.Println("Accpting connections on", mux.Addr())
+		for {
+			conn, err := mux.Accept()
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println("Connection from", conn)
+			go test(conn)
+		}
 	}
-
-	select {}
 }
 
 func test(conn net.Conn) {
 	go func() {
-		buf := make([]byte, 65536)
-		t0 := time.Now()
-		var c int64
-		for {
-			n, err := conn.Read(buf)
-			c += int64(n)
-			if err != nil {
-				break
-			}
-			if time.Since(t0) > time.Second {
-				//log.Printf("%v recv %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
-				c = 0
-				t0 = time.Now()
-			}
-		}
+		writeTo(conn)
+		conn.Close()
 	}()
 
+	readFrom(conn)
+
+	log.Println(conn, conn.(*dst.Conn).GetStatistics())
+}
+
+func readFrom(conn net.Conn) {
+	buf := make([]byte, 65536)
+	t0 := time.Now()
+	var c int64
+	for {
+		n, err := conn.Read(buf)
+		c += int64(n)
+		if err != nil {
+			break
+		}
+		if time.Since(t0) > time.Second {
+			log.Printf("%v recv %.1f MB, %.1f KB/s", conn, float64(c)/1024/1024, float64(c)/1024/time.Since(t0).Seconds())
+			c = 0
+			t0 = time.Now()
+		}
+	}
+}
+
+func writeTo(conn net.Conn) {
 	buf := make([]byte, 65536)
 	io.ReadFull(rand.Reader, buf)
 
@@ -86,8 +96,4 @@ func test(conn net.Conn) {
 			t1 = time.Now()
 		}
 	}
-
-	conn.Close()
-
-	log.Println(conn.(*dst.Conn).GetStatistics())
 }
