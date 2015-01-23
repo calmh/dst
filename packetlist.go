@@ -97,11 +97,16 @@ func (l *packetList) LowestSeq() sequenceNo {
 	return l.packets[0].hdr.sequenceNo
 }
 
-func (l *packetList) PopSequence() []packet {
+func (l *packetList) PopSequence(maxSeq sequenceNo) []packet {
 	highSeq := l.packets[0].hdr.sequenceNo
+	if highSeq >= maxSeq {
+		return nil
+	}
+
 	var i int
 	for i = 1; i < l.slot; i++ {
-		if l.packets[i].hdr.sequenceNo != highSeq+1 {
+		seq := l.packets[i].hdr.sequenceNo
+		if seq != highSeq+1 || seq >= maxSeq {
 			break
 		}
 		highSeq++

@@ -18,7 +18,7 @@ import (
 
 const (
 	defExpTime       = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	expCountClose    = 16                     // close connection after this many EXPs
+	expCountClose    = 16                     // close connection after this many Exps
 	minTimeClose     = 15 * time.Second       // if at least this long has passed
 	maxInputBuffer   = 8192 * 1024            // bytes
 	muxBufferPackets = 1024                   // buffer size of channel between mux and reader routine
@@ -34,6 +34,7 @@ func init() {
 
 type CongestionController interface {
 	Ack()
+	NegAck()
 	Exp()
 	SendWindow() int
 	PacketRate() int // PPS
@@ -71,11 +72,12 @@ type Conn struct {
 
 	// Owned by the reader routine, needs no locking
 
-	recvBuffer     packetList
-	nextRecvSeqNo  sequenceNo
-	lastAckedSeqNo sequenceNo
-	expCount       int
-	expReset       time.Time
+	recvBuffer        packetList
+	nextRecvSeqNo     sequenceNo
+	lastAckedSeqNo    sequenceNo
+	lastNegAckedSeqNo sequenceNo
+	expCount          int
+	expReset          time.Time
 
 	// Only accessed atomically
 
@@ -130,7 +132,7 @@ func (c *Conn) reader() {
 		select {
 		case <-c.closed:
 			// Ack any received but not yet acked messages.
-			c.sendACK()
+			c.sendAck()
 
 			// Send a shutdown message.
 			c.nextSeqNoMut.Lock()
@@ -157,18 +159,20 @@ func (c *Conn) reader() {
 
 			switch pkt.hdr.packetType {
 			case typeData:
-				c.recvdData(pkt)
-			case typeACK:
-				c.recvdACK(pkt)
+				c.rcvData(pkt)
+			case typeAck:
+				c.rcvAck(pkt)
+			case typeNegAck:
+				c.rcvNegAck(pkt)
 			case typeShutdown:
-				c.recvdShutdown(pkt)
+				c.rcvShutdown(pkt)
 			default:
 				log.Println("Unhandled packet", pkt)
 				continue
 			}
 
 		case <-c.exp.C:
-			c.eventEXP()
+			c.eventExp()
 			c.resetExp()
 
 		case n := <-c.debugResetRecvSeqNo:
@@ -179,13 +183,13 @@ func (c *Conn) reader() {
 	}
 }
 
-func (c *Conn) eventEXP() {
+func (c *Conn) eventExp() {
 	c.expCount++
 
 	resent := c.sendBuffer.ScheduleResend()
 	if resent {
 		if debugConnection {
-			log.Println(c, "did resends due to EXP")
+			log.Println(c, "did resends due to Exp")
 		}
 
 		c.cc.Exp()
@@ -193,18 +197,18 @@ func (c *Conn) eventEXP() {
 
 		if c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
 			if debugConnection {
-				log.Println(c, "close due to EXP")
+				log.Println(c, "close due to Exp")
 			}
 			c.Close()
 		}
 	}
 }
 
-func (c *Conn) recvdACK(pkt packet) {
+func (c *Conn) rcvAck(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 
 	if debugConnection {
-		log.Printf("%v read ACK %v", c, ack)
+		log.Printf("%v read Ack %v", c, ack)
 	}
 
 	c.sentPackets.Recv(ack)
@@ -220,7 +224,20 @@ func (c *Conn) recvdACK(pkt packet) {
 	c.resetExp()
 }
 
-func (c *Conn) recvdShutdown(pkt packet) {
+func (c *Conn) rcvNegAck(pkt packet) {
+	nak := pkt.hdr.sequenceNo
+
+	if debugConnection {
+		log.Printf("%v read NegAck %v", c, nak)
+	}
+
+	c.sendBuffer.NegativeAck(nak)
+
+	//c.cc.NegAck()
+	c.resetExp()
+}
+
+func (c *Conn) rcvShutdown(pkt packet) {
 	// XXX: We accept shutdown packets somewhat from the future since the
 	// sender will number the shutdown after any packets that might still be
 	// in the write buffer. This should be fixed to let the write buffer empty
@@ -233,7 +250,7 @@ func (c *Conn) recvdShutdown(pkt packet) {
 	}
 }
 
-func (c *Conn) recvdData(pkt packet) {
+func (c *Conn) rcvData(pkt packet) {
 	if pkt.LessSeq(c.nextRecvSeqNo) {
 		if debugConnection {
 			log.Printf("%v old packet received; seq %v, expected %v", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
@@ -247,7 +264,7 @@ func (c *Conn) recvdData(pkt packet) {
 	}
 	c.recvBuffer.InsertSorted(pkt)
 	if c.recvBuffer.LowestSeq() == c.nextRecvSeqNo {
-		for _, pkt := range c.recvBuffer.PopSequence() {
+		for _, pkt := range c.recvBuffer.PopSequence(^sequenceNo(0)) {
 			if debugConnection {
 				log.Println(c, "from recv buffer:", pkt)
 			}
@@ -256,7 +273,7 @@ func (c *Conn) recvdData(pkt packet) {
 
 			c.nextRecvSeqNo = pkt.hdr.sequenceNo + 1
 
-			c.sendACK()
+			c.sendAck()
 
 			c.inbufMut.Lock()
 			for c.inbuf.Len() > len(pkt.data)+maxInputBuffer {
@@ -273,15 +290,16 @@ func (c *Conn) recvdData(pkt packet) {
 			c.inbufMut.Unlock()
 		}
 	} else {
-		c.recvBuffer.InsertSorted(pkt)
 		if debugConnection {
 			log.Printf("%v lost; seq %v, expected %v", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
+		c.recvBuffer.InsertSorted(pkt)
+		c.sendNegAck()
 		atomic.AddInt64(&c.outOfOrderPackets, 1)
 	}
 }
 
-func (c *Conn) sendACK() {
+func (c *Conn) sendAck() {
 	if c.lastAckedSeqNo == c.nextRecvSeqNo {
 		return
 	}
@@ -290,7 +308,7 @@ func (c *Conn) sendACK() {
 		src: c.connID,
 		dst: c.dst,
 		hdr: header{
-			packetType: typeACK,
+			packetType: typeAck,
 			connID:     c.remoteConnID,
 			sequenceNo: c.nextRecvSeqNo,
 		},
@@ -299,10 +317,34 @@ func (c *Conn) sendACK() {
 	atomic.AddInt64(&c.packetsOut, 1)
 	atomic.AddInt64(&c.bytesOut, dstHeaderLen)
 	if debugConnection {
-		log.Printf("%v send ACK %v", c, c.nextRecvSeqNo)
+		log.Printf("%v send Ack %v", c, c.nextRecvSeqNo)
 	}
 
 	c.lastAckedSeqNo = c.nextRecvSeqNo
+}
+
+func (c *Conn) sendNegAck() {
+	if c.lastNegAckedSeqNo == c.nextRecvSeqNo {
+		return
+	}
+
+	c.mux.write(packet{
+		src: c.connID,
+		dst: c.dst,
+		hdr: header{
+			packetType: typeNegAck,
+			connID:     c.remoteConnID,
+			sequenceNo: c.nextRecvSeqNo,
+		},
+	})
+
+	atomic.AddInt64(&c.packetsOut, 1)
+	atomic.AddInt64(&c.bytesOut, dstHeaderLen)
+	if debugConnection {
+		log.Printf("%v send NegAck %v", c, c.nextRecvSeqNo)
+	}
+
+	c.lastNegAckedSeqNo = c.nextRecvSeqNo
 }
 
 func (c *Conn) resetExp() {

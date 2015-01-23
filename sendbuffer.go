@@ -101,6 +101,24 @@ func (b *sendBuffer) Acknowledge(seq sequenceNo) {
 	b.mut.Unlock()
 }
 
+func (b *sendBuffer) NegativeAck(seq sequenceNo) {
+	b.mut.Lock()
+
+	pkts := b.buffer.PopSequence(seq)
+	if cut := len(pkts); cut > 0 {
+		b.lost.AppendAll(pkts)
+		if debugConnection {
+			log.Println(b, "cut", cut, "from send list, adding to loss list")
+			log.Println(seq, pkts)
+		}
+		b.sendSlot -= cut
+		b.lostSendSlot = 0
+		b.cond.Broadcast()
+	}
+
+	b.mut.Unlock()
+}
+
 // ScheduleResend arranges for a resend of all currently unacknowledged
 // packets, up to the current window size. Returns true if at least one packet
 // was scheduled for resend, otherwise false.

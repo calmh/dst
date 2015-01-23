@@ -59,7 +59,19 @@ func (w *WindowCC) Ack() {
 	}
 
 	if changed && debugCC {
-		log.Println("ACK", w.currentWindow, w.currentRate)
+		log.Println("Ack", w.currentWindow, w.currentRate)
+	}
+}
+
+func (w *WindowCC) NegAck() {
+	if w.currentWindow > w.minWindow {
+		w.currentWindow /= 2
+	}
+	if w.currentRate > w.minRate {
+		w.currentRate /= 2
+	}
+	if debugCC {
+		log.Println("NegAck", w.currentWindow, w.currentRate)
 	}
 }
 
@@ -69,7 +81,7 @@ func (w *WindowCC) Exp() {
 		w.currentRate = w.currentRate / 2
 	}
 	if debugCC {
-		log.Println("EXP", w.currentWindow, w.currentRate)
+		log.Println("Exp", w.currentWindow, w.currentRate)
 	}
 }
 

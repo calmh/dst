@@ -32,7 +32,7 @@ var headerTests = []struct {
 	{
 		"24340000 22334455 55667788",
 		header{
-			packetType: typeACK,
+			packetType: typeAck,
 			flags:      flagCookie,
 			connID:     0x340000,
 			sequenceNo: 0x22334455,

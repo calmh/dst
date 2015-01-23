@@ -17,8 +17,8 @@ type packetType int8
 const (
 	typeHandshake packetType = 0x0
 	typeData                 = 0x1
-	typeACK                  = 0x2
-	typeNAK                  = 0x3
+	typeAck                  = 0x2
+	typeNegAck               = 0x3
 	typeShutdown             = 0x4
 )
 
@@ -28,10 +28,10 @@ func (t packetType) String() string {
 		return "data"
 	case typeHandshake:
 		return "handshake"
-	case typeACK:
+	case typeAck:
 		return "ack"
-	case typeNAK:
-		return "nak"
+	case typeNegAck:
+		return "negAck"
 	case typeShutdown:
 		return "shutdown"
 	default:
