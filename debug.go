@@ -5,6 +5,7 @@
 package dst
 
 import (
+	"log"
 	"os"
 	"strings"
 )
@@ -19,6 +20,9 @@ func init() {
 	debug := make(map[string]bool)
 	for _, s := range strings.Split(os.Getenv("DSTDEBUG"), ",") {
 		debug[strings.TrimSpace(s)] = true
+	}
+	if len(debug) > 0 {
+		log.SetFlags(log.Lmicroseconds | log.Lshortfile)
 	}
 	debugConnection = debug["conn"]
 	debugMux = debug["mux"]

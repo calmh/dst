@@ -150,10 +150,6 @@ func (c *Conn) reader() {
 			return
 
 		case pkt := <-c.in:
-			if debugConnection {
-				log.Println(c, "Read", pkt)
-			}
-
 			atomic.AddInt64(&c.packetsIn, 1)
 			atomic.AddInt64(&c.bytesIn, dstHeaderLen+int64(len(pkt.data)))
 
@@ -188,6 +184,10 @@ func (c *Conn) eventEXP() {
 
 	resent := c.sendBuffer.ScheduleResend()
 	if resent {
+		if debugConnection {
+			log.Println(c, "did resends due to EXP")
+		}
+
 		c.cc.Exp()
 		c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
 
@@ -217,6 +217,7 @@ func (c *Conn) recvdACK(pkt packet) {
 	}
 
 	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
+	c.resetExp()
 }
 
 func (c *Conn) recvdShutdown(pkt packet) {

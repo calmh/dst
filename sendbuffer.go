@@ -83,11 +83,17 @@ func (b *sendBuffer) Acknowledge(seq sequenceNo) {
 	b.mut.Lock()
 
 	if cut := b.lost.CutLessSeq(seq); cut > 0 {
+		if debugConnection {
+			log.Println(b, "cut", cut, "from loss list")
+		}
 		b.lostSendSlot = 0
 		b.cond.Broadcast()
 	}
 
 	if cut := b.buffer.CutLessSeq(seq); cut > 0 {
+		if debugConnection {
+			log.Println(b, "cut", cut, "from send list")
+		}
 		b.sendSlot -= cut
 		b.cond.Broadcast()
 	}
@@ -106,7 +112,7 @@ func (b *sendBuffer) ScheduleResend() (resent bool) {
 		// the send buffer to the loss list for retransmission.
 		resent = true
 		if debugConnection {
-			log.Println(b, "resend from buffer", b.sendSlot)
+			log.Println(b, "scheduled resend from buffer", b.sendSlot)
 		}
 
 		// Append the packets to the loss list and rewind the send buffer
@@ -181,16 +187,21 @@ func (b *sendBuffer) writerLoop() {
 		}
 
 		if b.lostSendSlot < b.lost.Len() {
-			if debugConnection {
-				log.Println("resend", b.lostSendSlot, b.lost.Len())
-			}
 			pkt = b.lost.All()[b.lostSendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.lostSendSlot++
+
+			if debugConnection {
+				log.Println(b, "resend", pkt.hdr.connID, pkt.hdr.sequenceNo)
+			}
 		} else if b.sendSlot < b.buffer.Len() {
 			pkt = b.buffer.All()[b.sendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.sendSlot++
+
+			if debugConnection {
+				log.Println(b, "send", pkt.hdr.connID, pkt.hdr.sequenceNo)
+			}
 		}
 
 		b.cond.Broadcast()

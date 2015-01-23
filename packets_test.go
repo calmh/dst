@@ -20,7 +20,7 @@ var headerTests = []struct {
 		header{},
 	},
 	{
-		"00123456 A0008901 98765432",
+		"10123456 A0008901 98765432",
 		header{
 			packetType: typeData,
 			flags:      0,
@@ -30,7 +30,7 @@ var headerTests = []struct {
 		},
 	},
 	{
-		"34340000 22334455 55667788",
+		"24340000 22334455 55667788",
 		header{
 			packetType: typeACK,
 			flags:      flagCookie,
