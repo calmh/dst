@@ -199,6 +199,12 @@ func (c *Conn) eventExp() {
 			if debugConnection {
 				log.Println(c, "close due to Exp")
 			}
+
+			// We're shutting down due to repeated exp:s. Don't wait for the
+			// send buffer to drain, which it would otherwise do in
+			// c.Close()..
+			c.sendBuffer.CrashStop()
+
 			c.Close()
 		}
 	}

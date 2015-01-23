@@ -32,9 +32,10 @@ type sendBuffer struct {
 	lost         packetList // list of packets reported lost by timeout
 	lostSendSlot int        // next lost packet to resend
 
-	closed bool
-	mut    sync.Mutex
-	cond   *sync.Cond
+	closed  bool
+	closing bool
+	mut     sync.Mutex
+	cond    *sync.Cond
 }
 
 const (
@@ -62,7 +63,7 @@ func (b *sendBuffer) Write(pkt packet) error {
 	defer b.mut.Unlock()
 
 	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
-		if b.closed {
+		if b.closing {
 			return ErrClosed
 		}
 		if debugConnection {
@@ -169,14 +170,35 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 	b.mut.Unlock()
 }
 
-// Stop stops the send buffer from any doing further sending.
+// Stop stops the send buffer from any doing further sending, but waits for
+// the current buffers to be drained.
 func (b *sendBuffer) Stop() {
 	b.mut.Lock()
 
+	if b.closed || b.closing {
+		return
+	}
+
+	b.closing = true
 	for b.lost.Len() > 0 || b.buffer.Len() > 0 {
 		b.cond.Wait()
 	}
 
+	b.closed = true
+	b.cond.Broadcast()
+	b.mut.Unlock()
+}
+
+// CrashStop stops the send buffer from any doing further sending, without
+// waiting for buffers to drain.
+func (b *sendBuffer) CrashStop() {
+	b.mut.Lock()
+
+	if b.closed || b.closing {
+		return
+	}
+
+	b.closing = true
 	b.closed = true
 	b.cond.Broadcast()
 	b.mut.Unlock()
