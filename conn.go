@@ -394,6 +394,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
+		if debugConnection {
+			log.Println(c, "explicit close start")
+			defer log.Println(c, "explicit close done")
+		}
+
 		// XXX: Ugly hack to implement lingering sockets...
 		time.Sleep(4 * defExpTime)
 
@@ -432,13 +437,13 @@ func (c *Conn) RemoteAddr() net.Addr {
 //
 // A zero value for t means I/O operations will not time out.
 func (c *Conn) SetDeadline(t time.Time) error {
-	return nil
+	panic("unimplemented")
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 // A zero value for t means Read will not time out.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	return nil
+	panic("unimplemented")
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
@@ -446,7 +451,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // some of the data was successfully written.
 // A zero value for t means Write will not time out.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	return nil
+	panic("unimplemented")
 }
 
 type Statistics struct {

@@ -154,6 +154,11 @@ func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 // Stop stops the send buffer from any doing further sending.
 func (b *sendBuffer) Stop() {
 	b.mut.Lock()
+
+	for b.lost.Len() > 0 || b.buffer.Len() > 0 {
+		b.cond.Wait()
+	}
+
 	b.closed = true
 	b.cond.Broadcast()
 	b.mut.Unlock()
