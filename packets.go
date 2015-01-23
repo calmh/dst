@@ -15,12 +15,11 @@ const dstHeaderLen = 12
 type packetType int8
 
 const (
-	typeData      packetType = 0x0
-	typeHandshake            = 0x1
-	typeKeepAlive            = 0x2
-	typeACK                  = 0x3
-	typeNAK                  = 0x5
-	typeShutdown             = 0x6
+	typeHandshake packetType = 0x0
+	typeData                 = 0x1
+	typeACK                  = 0x2
+	typeNAK                  = 0x3
+	typeShutdown             = 0x4
 )
 
 func (t packetType) String() string {
@@ -29,8 +28,6 @@ func (t packetType) String() string {
 		return "data"
 	case typeHandshake:
 		return "handshake"
-	case typeKeepAlive:
-		return "keepalive"
 	case typeACK:
 		return "ack"
 	case typeNAK:

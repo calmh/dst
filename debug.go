@@ -10,6 +10,17 @@ import (
 )
 
 var (
-	debugConnection = strings.Contains(os.Getenv("DSTDEBUG"), "conn")
-	debugMux        = strings.Contains(os.Getenv("DSTDEBUG"), "mux")
+	debugConnection bool
+	debugMux        bool
+	debugCC         bool
 )
+
+func init() {
+	debug := make(map[string]bool)
+	for _, s := range strings.Split(os.Getenv("DSTDEBUG"), ",") {
+		debug[strings.TrimSpace(s)] = true
+	}
+	debugConnection = debug["conn"]
+	debugMux = debug["mux"]
+	debugCC = debug["cc"]
+}

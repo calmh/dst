@@ -6,8 +6,6 @@ package dst
 
 import (
 	"log"
-	"os"
-	"strings"
 	"time"
 )
 
@@ -22,8 +20,6 @@ type WindowCC struct {
 	curRTT time.Duration
 	minRTT time.Duration
 }
-
-var debugWindowCC = strings.Contains(os.Getenv("DSTDEBUG"), "windowcc")
 
 func NewWindowCC() *WindowCC {
 	return &WindowCC{
@@ -62,7 +58,7 @@ func (w *WindowCC) Ack() {
 		changed = true
 	}
 
-	if changed && debugWindowCC {
+	if changed && debugCC {
 		log.Println("ACK", w.currentWindow, w.currentRate)
 	}
 }
@@ -72,7 +68,7 @@ func (w *WindowCC) Exp() {
 	if w.currentRate > w.minRate {
 		w.currentRate = w.currentRate / 2
 	}
-	if debugWindowCC {
+	if debugCC {
 		log.Println("EXP", w.currentWindow, w.currentRate)
 	}
 }
@@ -101,7 +97,7 @@ func (w *WindowCC) UpdateRTT(rtt time.Duration) {
 	w.curRTT = rtt
 	if w.curRTT < w.minRTT {
 		w.minRTT = w.curRTT
-		if debugWindowCC {
+		if debugCC {
 			log.Println("Min RTT", w.minRTT)
 		}
 	}
@@ -111,12 +107,12 @@ func (w *WindowCC) UpdateRTT(rtt time.Duration) {
 		w.currentRate = w.currentRate * 7 / 8
 		w.maxRate = w.currentRate * 3 / 2
 		w.minRTT = w.curRTT
-		if debugWindowCC {
+		if debugCC {
 			log.Println("Nailing rate", w.currentRate, w.maxRate)
 		}
 	}
 
-	if debugWindowCC {
+	if debugCC {
 		log.Println("RTT", w.curRTT)
 	}
 }

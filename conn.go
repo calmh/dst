@@ -14,17 +14,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/juju/ratelimit"
 )
 
 const (
-	defExpTime     = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
-	defSynTime     = 10 * time.Millisecond
-	expCountClose  = 16               // close connection after this many EXPs
-	minTimeClose   = 15 * time.Second // if at least this long has passed
-	maxInputBuffer = 8192 * 1024      // bytes
+	defExpTime       = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
+	expCountClose    = 16                     // close connection after this many EXPs
+	minTimeClose     = 15 * time.Second       // if at least this long has passed
+	maxInputBuffer   = 8192 * 1024            // bytes
+	muxBufferPackets = 1024                   // buffer size of channel between mux and reader routine
+	rttMeasureWindow = 32                     // number of packets to track for RTT averaging
 
+	// number of bytes to subtract from MTU when chunking data, to avoid fragmentation
 	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
 
@@ -50,45 +50,34 @@ type Conn struct {
 	remoteConnID connectionID
 	in           chan packet
 	cc           CongestionController
+	packetSize   int
+	closed       chan struct{}
+	closeOnce    sync.Once
 
 	// Touched by more than one goroutine, needs locking.
 
-	nextSeqNo    sequenceNo
 	nextSeqNoMut sync.Mutex
+	nextSeqNo    sequenceNo
 
-	inbuf     bytes.Buffer
 	inbufMut  sync.Mutex
 	inbufCond *sync.Cond
+	inbuf     bytes.Buffer
 
-	sendBuffer *sendBuffer
-	recvBuffer packetList
-
-	exp    *time.Timer
 	expMut sync.Mutex
+	exp    *time.Timer
 
-	syn    *time.Timer
-	synMut sync.Mutex
+	sendBuffer  *sendBuffer // goroutine safe
+	sentPackets *timeBuffer // goroutine safe
 
-	packetSize int
+	// Owned by the reader routine, needs no locking
 
-	sentPackets *timeBuffer
-
-	// Only touched by the reader routine, needs no locking
-
+	recvBuffer     packetList
 	nextRecvSeqNo  sequenceNo
 	lastAckedSeqNo sequenceNo
+	expCount       int
+	expReset       time.Time
 
-	expCount int
-	expReset time.Time
-
-	// Special
-
-	writeScheduler *ratelimit.Bucket
-
-	closed    chan struct{}
-	closeOnce sync.Once
-
-	debugResetRecvSeqNo chan sequenceNo
+	// Only accessed atomically
 
 	packetsIn         int64
 	packetsOut        int64
@@ -97,6 +86,10 @@ type Conn struct {
 	resentPackets     int64
 	droppedPackets    int64
 	outOfOrderPackets int64
+
+	// Special
+
+	debugResetRecvSeqNo chan sequenceNo
 }
 
 func newConn(m *Mux, dst net.Addr) *Conn {
@@ -105,12 +98,11 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 		dst:                 dst,
 		nextSeqNo:           sequenceNo(rand.Uint32()),
 		packetSize:          maxPacketSize,
-		in:                  make(chan packet, 1024),
+		in:                  make(chan packet, muxBufferPackets),
 		closed:              make(chan struct{}),
-		sentPackets:         NewTimeBuffer(32),
+		sentPackets:         NewTimeBuffer(rttMeasureWindow),
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
-		syn:                 time.NewTimer(defSynTime),
 		debugResetRecvSeqNo: make(chan sequenceNo),
 		expReset:            time.Now(),
 	}
@@ -170,8 +162,6 @@ func (c *Conn) reader() {
 			switch pkt.hdr.packetType {
 			case typeData:
 				c.recvdData(pkt)
-			case typeKeepAlive:
-				c.recvdKeepAlive(pkt)
 			case typeACK:
 				c.recvdACK(pkt)
 			case typeShutdown:
@@ -184,10 +174,6 @@ func (c *Conn) reader() {
 		case <-c.exp.C:
 			c.eventEXP()
 			c.resetExp()
-
-		case <-c.syn.C:
-			c.eventSYN()
-			c.resetSyn(defSynTime)
 
 		case n := <-c.debugResetRecvSeqNo:
 			// Back door for testing
@@ -214,10 +200,6 @@ func (c *Conn) eventEXP() {
 	}
 }
 
-func (c *Conn) eventSYN() {
-	c.sendACK()
-}
-
 func (c *Conn) recvdACK(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 
@@ -235,9 +217,6 @@ func (c *Conn) recvdACK(pkt packet) {
 	}
 
 	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
-}
-
-func (c *Conn) recvdKeepAlive(pkt packet) {
 }
 
 func (c *Conn) recvdShutdown(pkt packet) {
@@ -327,8 +306,7 @@ func (c *Conn) sendACK() {
 
 func (c *Conn) resetExp() {
 	d, _ := c.sentPackets.Average()
-	d *= 4
-	d += defSynTime
+	d = d*4 + 10*time.Millisecond
 
 	if d < defExpTime {
 		d = defExpTime
@@ -337,12 +315,6 @@ func (c *Conn) resetExp() {
 	c.expMut.Lock()
 	c.exp.Reset(d)
 	c.expMut.Unlock()
-}
-
-func (c *Conn) resetSyn(d time.Duration) {
-	c.synMut.Lock()
-	c.syn.Reset(d)
-	c.synMut.Unlock()
 }
 
 // String returns a string representation of the connection.
