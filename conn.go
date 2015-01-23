@@ -32,7 +32,8 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-type CongestionController interface {
+// TODO: export this interface when it's usable from the outside
+type congestionController interface {
 	Ack()
 	NegAck()
 	Exp()
@@ -50,7 +51,7 @@ type Conn struct {
 	connID       connectionID
 	remoteConnID connectionID
 	in           chan packet
-	cc           CongestionController
+	cc           congestionController
 	packetSize   int
 	closed       chan struct{}
 	closeOnce    sync.Once
@@ -102,7 +103,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 		packetSize:          maxPacketSize,
 		in:                  make(chan packet, muxBufferPackets),
 		closed:              make(chan struct{}),
-		sentPackets:         NewTimeBuffer(rttMeasureWindow),
+		sentPackets:         newTimeBuffer(rttMeasureWindow),
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		debugResetRecvSeqNo: make(chan sequenceNo),
@@ -111,7 +112,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 
 	conn.inbufCond = sync.NewCond(&conn.inbufMut)
 
-	conn.cc = NewWindowCC()
+	conn.cc = newWindowCC()
 	conn.sendBuffer.SetWindowAndRate(conn.cc.SendWindow(), conn.cc.PacketRate())
 	conn.recvBuffer.Resize(128)
 
@@ -484,12 +485,16 @@ func (c *Conn) RemoteAddr() net.Addr {
 // the deadline after successful Read or Write calls.
 //
 // A zero value for t means I/O operations will not time out.
+//
+// BUG(jb): SetDeadline is not implemented.
 func (c *Conn) SetDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 // A zero value for t means Read will not time out.
+//
+// BUG(jb): SetReadDeadline is not implemented.
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	panic("unimplemented")
 }
@@ -498,6 +503,8 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // Even if write times out, it may return n > 0, indicating that
 // some of the data was successfully written.
 // A zero value for t means Write will not time out.
+//
+// BUG(jb): SetWriteDeadline is not implemented.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	panic("unimplemented")
 }
@@ -512,11 +519,13 @@ type Statistics struct {
 	OutOfOrderPackets int64
 }
 
+// String returns a printable represetnation of the Statistics.
 func (s Statistics) String() string {
 	return fmt.Sprintf("PktsIn: %d, PktsOut: %d, BytesIn: %d, BytesOut: %d, PktsResent: %d, PktsDropped: %d, PktsOutOfOrder: %d",
 		s.DataPacketsIn, s.DataPacketsOut, s.DataBytesIn, s.DataBytesOut, s.ResentPackets, s.DroppedPackets, s.OutOfOrderPackets)
 }
 
+// GetStatistics returns a snapsht of the current connection statistics.
 func (c *Conn) GetStatistics() Statistics {
 	return Statistics{
 		DataPacketsIn:     atomic.LoadInt64(&c.packetsIn),

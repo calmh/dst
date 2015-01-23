@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-type WindowCC struct {
+type windowCC struct {
 	minWindow     int
 	maxWindow     int
 	currentWindow int
@@ -21,8 +21,8 @@ type WindowCC struct {
 	minRTT time.Duration
 }
 
-func NewWindowCC() *WindowCC {
-	return &WindowCC{
+func newWindowCC() *windowCC {
+	return &windowCC{
 		minWindow:     2,
 		maxWindow:     4096,
 		currentWindow: 16,
@@ -35,7 +35,7 @@ func NewWindowCC() *WindowCC {
 	}
 }
 
-func (w *WindowCC) Ack() {
+func (w *windowCC) Ack() {
 	changed := false
 
 	if w.curRTT > 100000 {
@@ -63,7 +63,7 @@ func (w *WindowCC) Ack() {
 	}
 }
 
-func (w *WindowCC) NegAck() {
+func (w *windowCC) NegAck() {
 	if w.currentWindow > w.minWindow {
 		w.currentWindow /= 2
 	}
@@ -75,7 +75,7 @@ func (w *WindowCC) NegAck() {
 	}
 }
 
-func (w *WindowCC) Exp() {
+func (w *windowCC) Exp() {
 	w.currentWindow = w.minWindow
 	if w.currentRate > w.minRate {
 		w.currentRate = w.currentRate / 2
@@ -85,7 +85,7 @@ func (w *WindowCC) Exp() {
 	}
 }
 
-func (w *WindowCC) SendWindow() int {
+func (w *windowCC) SendWindow() int {
 	if w.currentWindow < w.minWindow {
 		return w.minWindow
 	}
@@ -95,7 +95,7 @@ func (w *WindowCC) SendWindow() int {
 	return w.currentWindow
 }
 
-func (w *WindowCC) PacketRate() int {
+func (w *windowCC) PacketRate() int {
 	if w.currentRate < w.minRate {
 		return w.minRate
 	}
@@ -105,7 +105,7 @@ func (w *WindowCC) PacketRate() int {
 	return w.currentRate
 }
 
-func (w *WindowCC) UpdateRTT(rtt time.Duration) {
+func (w *windowCC) UpdateRTT(rtt time.Duration) {
 	w.curRTT = rtt
 	if w.curRTT < w.minRTT {
 		w.minRTT = w.curRTT

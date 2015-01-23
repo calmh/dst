@@ -4,10 +4,12 @@
 
 package dst
 
+// Error represents the various dst-internal error conditions.
 type Error struct {
 	Err string
 }
 
+// Error returns a string representation of the error.
 func (e Error) Error() string {
 	return e.Err
 }

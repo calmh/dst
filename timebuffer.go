@@ -21,7 +21,7 @@ type timeBufValue struct {
 	recv time.Time
 }
 
-func NewTimeBuffer(size int) *timeBuffer {
+func newTimeBuffer(size int) *timeBuffer {
 	return &timeBuffer{
 		seq2Sent: make([]timeBufValue, size),
 	}
