@@ -16,7 +16,7 @@ type timeBuffer struct {
 }
 
 type timeBufValue struct {
-	seq  uint32
+	seq  sequenceNo
 	sent time.Time
 	recv time.Time
 }
@@ -27,7 +27,7 @@ func NewTimeBuffer(size int) *timeBuffer {
 	}
 }
 
-func (b *timeBuffer) Sent(seq uint32) {
+func (b *timeBuffer) Sent(seq sequenceNo) {
 	now := time.Now()
 	b.mut.Lock()
 	b.seq2Sent[b.next] = timeBufValue{seq: seq, sent: now}
@@ -35,7 +35,7 @@ func (b *timeBuffer) Sent(seq uint32) {
 	b.mut.Unlock()
 }
 
-func (b *timeBuffer) Recv(seq uint32) {
+func (b *timeBuffer) Recv(seq sequenceNo) {
 	now := time.Now()
 	b.mut.Lock()
 	for i := range b.seq2Sent {

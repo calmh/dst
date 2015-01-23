@@ -182,8 +182,8 @@ func TestSequenceWrap(t *testing.T) {
 	src := make([]byte, size)
 	io.ReadFull(rand.Reader, src)
 
-	aConn.nextSeqNo = uint32(2<<31 - size*n/2)
-	bConn.debugResetRecvSeqNo <- uint32(2<<31 - size*n/2)
+	aConn.nextSeqNo = sequenceNo(2<<31 - size*n/2)
+	bConn.debugResetRecvSeqNo <- sequenceNo(2<<31 - size*n/2)
 
 	go func() {
 		for i := 0; i < n; i++ {
@@ -415,7 +415,7 @@ func testPacketSize(muxA, muxB *Mux, t *testing.T) {
 		}
 
 		stats := conn.GetStatistics()
-		if uint64(n)/stats.DataPacketsIn > 256 {
+		if int64(n)/stats.DataPacketsIn > 256 {
 			errors <- fmt.Errorf("Too much data read; %d bytes in %d packets", n, stats.DataPacketsIn)
 			return
 		}

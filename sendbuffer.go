@@ -79,7 +79,7 @@ func (b *sendBuffer) Write(pkt packet) error {
 
 // Acknowledge removes packets with lower sequence numbers from the loss list
 // or send buffer.
-func (b *sendBuffer) Acknowledge(seq uint32) {
+func (b *sendBuffer) Acknowledge(seq sequenceNo) {
 	b.mut.Lock()
 
 	if cut := b.lost.CutLessSeq(seq); cut > 0 {

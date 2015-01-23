@@ -11,7 +11,7 @@ type packetList struct {
 
 // CutLessSeq cuts packets from the start of the list with sequence numbers
 // lower than seq. Returns the number of packets that were cut.
-func (l *packetList) CutLessSeq(seq uint32) int {
+func (l *packetList) CutLessSeq(seq sequenceNo) int {
 	var i int
 	for i = range l.packets {
 		if i == l.slot {
@@ -93,7 +93,7 @@ func (l *packetList) InsertSorted(pkt packet) {
 	}
 }
 
-func (l *packetList) LowestSeq() uint32 {
+func (l *packetList) LowestSeq() sequenceNo {
 	return l.packets[0].hdr.sequenceNo
 }
 

@@ -4,8 +4,19 @@
 
 package dst
 
-import "time"
+import (
+	"math/rand"
+	"time"
+)
 
-func timestampMicros() uint32 {
-	return uint32(time.Now().UnixNano() / 1000)
+func timestampMicros() timestamp {
+	return timestamp(time.Now().UnixNano() / 1000)
+}
+
+func randomSeqNo() sequenceNo {
+	return sequenceNo(rand.Uint32())
+}
+
+func randomConnID() connectionID {
+	return connectionID(rand.Uint32() & 0xffffff)
 }

@@ -7,7 +7,6 @@ package dst
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -25,8 +24,8 @@ type Mux struct {
 	conn       net.PacketConn
 	packetSize int
 
-	conns      map[uint32]*Conn
-	handshakes map[uint32]chan packet
+	conns      map[connectionID]*Conn
+	handshakes map[connectionID]chan packet
 	connsMut   sync.Mutex
 
 	incoming  chan *Conn
@@ -44,8 +43,8 @@ func NewMux(conn net.PacketConn, packetSize int) *Mux {
 	m := &Mux{
 		conn:       conn,
 		packetSize: packetSize,
-		conns:      map[uint32]*Conn{},
-		handshakes: make(map[uint32]chan packet),
+		conns:      map[connectionID]*Conn{},
+		handshakes: make(map[connectionID]chan packet),
 		incoming:   make(chan *Conn, maxIncomingRequests),
 		closed:     make(chan struct{}),
 		buffers: &sync.Pool{
@@ -173,9 +172,9 @@ func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
 }
 
 // handshake performs the client side handshake (i.e. Dial)
-func (m *Mux) clientHandshake(dst net.Addr, connID uint32, resp chan packet) (*Conn, error) {
+func (m *Mux) clientHandshake(dst net.Addr, connID connectionID, resp chan packet) (*Conn, error) {
 	if debugMux {
-		log.Printf("%v dial %v connID 0x%08x", m, dst, connID)
+		log.Printf("%v dial %v connID %v", m, dst, connID)
 	}
 
 	nextHandshake := time.NewTimer(0)
@@ -185,7 +184,7 @@ func (m *Mux) clientHandshake(dst net.Addr, connID uint32, resp chan packet) (*C
 	defer handshakeTimeout.Stop()
 
 	var remoteCookie uint32
-	seqNo := rand.Uint32()
+	seqNo := randomSeqNo()
 
 	for {
 		select {
@@ -280,7 +279,7 @@ func (m *Mux) readerLoop() {
 					data: bufCopy,
 				}
 			} else if debugMux {
-				log.Printf("Data packet for unknown conn %08x", hdr.connID)
+				log.Printf("Data packet for unknown conn %v", hdr.connID)
 			}
 
 		case typeHandshake:
@@ -298,7 +297,7 @@ func (m *Mux) readerLoop() {
 					data: bufCopy,
 				}
 			} else if debugMux && hdr.packetType != typeShutdown {
-				log.Printf("Control packet %v for unknown conn %08x", hdr, hdr.connID)
+				log.Printf("Control packet %v for unknown conn %v", hdr, hdr.connID)
 			}
 		}
 	}
@@ -336,7 +335,7 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 			return
 		}
 
-		seqNo := rand.Uint32()
+		seqNo := randomSeqNo()
 
 		m.connsMut.Lock()
 		connID := m.newConnID()
@@ -385,7 +384,7 @@ func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
 				data: data,
 			}
 		} else if debugMux && hdr.packetType != typeShutdown {
-			log.Printf("Handshake packet %v for unknown conn %08x", hdr, hdr.connID)
+			log.Printf("Handshake packet %v for unknown conn %v", hdr, hdr.connID)
 		}
 	}
 }
@@ -408,9 +407,9 @@ func (m *Mux) String() string {
 }
 
 // Find a unique connection ID
-func (m *Mux) newConnID() uint32 {
+func (m *Mux) newConnID() connectionID {
 	for {
-		connID := uint32(rand.Uint32() & 0xffffff)
+		connID := randomConnID()
 		if _, ok := m.conns[connID]; ok {
 			continue
 		}

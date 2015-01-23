@@ -23,7 +23,7 @@ const (
 	defSynTime     = 10 * time.Millisecond
 	expCountClose  = 16               // close connection after this many EXPs
 	minTimeClose   = 15 * time.Second // if at least this long has passed
-	maxInputBuffer = 8192 * 1024
+	maxInputBuffer = 8192 * 1024      // bytes
 
 	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
@@ -46,14 +46,14 @@ type Conn struct {
 
 	mux          *Mux
 	dst          net.Addr
-	connID       uint32
-	remoteConnID uint32
+	connID       connectionID
+	remoteConnID connectionID
 	in           chan packet
 	cc           CongestionController
 
 	// Touched by more than one goroutine, needs locking.
 
-	nextSeqNo    uint32
+	nextSeqNo    sequenceNo
 	nextSeqNoMut sync.Mutex
 
 	inbuf     bytes.Buffer
@@ -75,8 +75,8 @@ type Conn struct {
 
 	// Only touched by the reader routine, needs no locking
 
-	nextRecvSeqNo  uint32
-	lastAckedSeqNo uint32
+	nextRecvSeqNo  sequenceNo
+	lastAckedSeqNo sequenceNo
 
 	expCount int
 	expReset time.Time
@@ -88,28 +88,22 @@ type Conn struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 
-	debugResetRecvSeqNo chan uint32
+	debugResetRecvSeqNo chan sequenceNo
 
-	packetsIn         uint64
-	packetsOut        uint64
-	bytesIn           uint64
-	bytesOut          uint64
-	resentPackets     uint64
-	droppedPackets    uint64
-	outOfOrderPackets uint64
-}
-
-type ackTimestamp struct {
-	sequenceNo uint32
-	time       int64
-	packets    uint64
+	packetsIn         int64
+	packetsOut        int64
+	bytesIn           int64
+	bytesOut          int64
+	resentPackets     int64
+	droppedPackets    int64
+	outOfOrderPackets int64
 }
 
 func newConn(m *Mux, dst net.Addr) *Conn {
 	conn := &Conn{
 		mux:                 m,
 		dst:                 dst,
-		nextSeqNo:           rand.Uint32(),
+		nextSeqNo:           sequenceNo(rand.Uint32()),
 		packetSize:          maxPacketSize,
 		in:                  make(chan packet, 1024),
 		closed:              make(chan struct{}),
@@ -117,7 +111,7 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		syn:                 time.NewTimer(defSynTime),
-		debugResetRecvSeqNo: make(chan uint32),
+		debugResetRecvSeqNo: make(chan sequenceNo),
 		expReset:            time.Now(),
 	}
 
@@ -159,8 +153,8 @@ func (c *Conn) reader() {
 			})
 			c.nextSeqNo++
 			c.nextSeqNoMut.Unlock()
-			atomic.AddUint64(&c.packetsOut, 1)
-			atomic.AddUint64(&c.bytesOut, dstHeaderLen)
+			atomic.AddInt64(&c.packetsOut, 1)
+			atomic.AddInt64(&c.bytesOut, dstHeaderLen)
 			return
 
 		case pkt := <-c.in:
@@ -168,8 +162,8 @@ func (c *Conn) reader() {
 				log.Println(c, "Read", pkt)
 			}
 
-			atomic.AddUint64(&c.packetsIn, 1)
-			atomic.AddUint64(&c.bytesIn, dstHeaderLen+uint64(len(pkt.data)))
+			atomic.AddInt64(&c.packetsIn, 1)
+			atomic.AddInt64(&c.bytesIn, dstHeaderLen+int64(len(pkt.data)))
 
 			c.expCount = 1
 
@@ -228,7 +222,7 @@ func (c *Conn) recvdACK(pkt packet) {
 	ack := pkt.hdr.sequenceNo
 
 	if debugConnection {
-		log.Printf("%v read ACK 0x%08x", c, ack)
+		log.Printf("%v read ACK %v", c, ack)
 	}
 
 	c.sentPackets.Recv(ack)
@@ -262,9 +256,9 @@ func (c *Conn) recvdShutdown(pkt packet) {
 func (c *Conn) recvdData(pkt packet) {
 	if pkt.LessSeq(c.nextRecvSeqNo) {
 		if debugConnection {
-			log.Printf("%v old packet received; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
+			log.Printf("%v old packet received; seq %v, expected %v", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
-		atomic.AddUint64(&c.droppedPackets, 1)
+		atomic.AddInt64(&c.droppedPackets, 1)
 		return
 	}
 
@@ -301,9 +295,9 @@ func (c *Conn) recvdData(pkt packet) {
 	} else {
 		c.recvBuffer.InsertSorted(pkt)
 		if debugConnection {
-			log.Printf("%v lost; seq 0x%08x, expected 0x%08x", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
+			log.Printf("%v lost; seq %v, expected %v", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
 		}
-		atomic.AddUint64(&c.outOfOrderPackets, 1)
+		atomic.AddInt64(&c.outOfOrderPackets, 1)
 	}
 }
 
@@ -322,10 +316,10 @@ func (c *Conn) sendACK() {
 		},
 	})
 
-	atomic.AddUint64(&c.packetsOut, 1)
-	atomic.AddUint64(&c.bytesOut, dstHeaderLen)
+	atomic.AddInt64(&c.packetsOut, 1)
+	atomic.AddInt64(&c.bytesOut, dstHeaderLen)
 	if debugConnection {
-		log.Printf("%v send ACK 0x%08x", c, c.nextRecvSeqNo)
+		log.Printf("%v send ACK %v", c, c.nextRecvSeqNo)
 	}
 
 	c.lastAckedSeqNo = c.nextRecvSeqNo
@@ -353,7 +347,7 @@ func (c *Conn) resetSyn(d time.Duration) {
 
 // String returns a string representation of the connection.
 func (c *Conn) String() string {
-	return fmt.Sprintf("Connection-%08x/%v/%v", c.connID, c.LocalAddr(), c.RemoteAddr())
+	return fmt.Sprintf("%v/%v/%v", c.connID, c.LocalAddr(), c.RemoteAddr())
 }
 
 // Read reads data from the connection.
@@ -414,8 +408,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 		c.sentPackets.Sent(pkt.hdr.sequenceNo)
 
-		atomic.AddUint64(&c.packetsOut, 1)
-		atomic.AddUint64(&c.bytesOut, uint64(len(slice)+dstHeaderLen))
+		atomic.AddInt64(&c.packetsOut, 1)
+		atomic.AddInt64(&c.bytesOut, int64(len(slice)+dstHeaderLen))
 
 		sent += len(slice)
 		c.resetExp()
@@ -483,13 +477,13 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 }
 
 type Statistics struct {
-	DataPacketsIn     uint64
-	DataPacketsOut    uint64
-	DataBytesIn       uint64
-	DataBytesOut      uint64
-	ResentPackets     uint64
-	DroppedPackets    uint64
-	OutOfOrderPackets uint64
+	DataPacketsIn     int64
+	DataPacketsOut    int64
+	DataBytesIn       int64
+	DataBytesOut      int64
+	ResentPackets     int64
+	DroppedPackets    int64
+	OutOfOrderPackets int64
 }
 
 func (s Statistics) String() string {
@@ -499,12 +493,12 @@ func (s Statistics) String() string {
 
 func (c *Conn) GetStatistics() Statistics {
 	return Statistics{
-		DataPacketsIn:     atomic.LoadUint64(&c.packetsIn),
-		DataPacketsOut:    atomic.LoadUint64(&c.packetsOut),
-		DataBytesIn:       atomic.LoadUint64(&c.bytesIn),
-		DataBytesOut:      atomic.LoadUint64(&c.bytesOut),
-		ResentPackets:     atomic.LoadUint64(&c.resentPackets),
-		DroppedPackets:    atomic.LoadUint64(&c.droppedPackets),
-		OutOfOrderPackets: atomic.LoadUint64(&c.outOfOrderPackets),
+		DataPacketsIn:     atomic.LoadInt64(&c.packetsIn),
+		DataPacketsOut:    atomic.LoadInt64(&c.packetsOut),
+		DataBytesIn:       atomic.LoadInt64(&c.bytesIn),
+		DataBytesOut:      atomic.LoadInt64(&c.bytesOut),
+		ResentPackets:     atomic.LoadInt64(&c.resentPackets),
+		DroppedPackets:    atomic.LoadInt64(&c.droppedPackets),
+		OutOfOrderPackets: atomic.LoadInt64(&c.outOfOrderPackets),
 	}
 }
