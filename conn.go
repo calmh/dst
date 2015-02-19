@@ -395,7 +395,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 func (c *Conn) Write(b []byte) (n int, err error) {
 	select {
 	case <-c.closed:
-		return 0, ErrClosed
+		return 0, ErrClosedConn
 	default:
 	}
 

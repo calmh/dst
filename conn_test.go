@@ -174,7 +174,7 @@ func TestClosedReadWrite(t *testing.T) {
 	}
 
 	_, err = a.Write([]byte("something"))
-	if err != ErrClosed {
+	if err != ErrClosedConn {
 		t.Error("Unexpected non-ErrClosed error", err)
 	}
 
@@ -190,7 +190,7 @@ func TestClosedReadWrite(t *testing.T) {
 	// b should also have closed
 
 	_, err = b.Write([]byte("something"))
-	if err != ErrClosed {
+	if err != ErrClosedConn {
 		t.Error("Unexpected non-ErrClosed error", err)
 	}
 
@@ -403,7 +403,7 @@ func TestTimeoutCloseWrite(t *testing.T) {
 
 	for {
 		_, err := a.Write([]byte("stuff to write"))
-		if err == ErrClosed {
+		if err == ErrClosedConn {
 			return
 		}
 		if err != nil {

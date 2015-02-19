@@ -86,7 +86,7 @@ func (m *Mux) Accept() (net.Conn, error) {
 func (m *Mux) AcceptDST() (*Conn, error) {
 	conn, ok := <-m.incoming
 	if !ok {
-		return nil, ErrAcceptClosed
+		return nil, ErrClosedMux
 	}
 	return conn, nil
 }
@@ -94,7 +94,7 @@ func (m *Mux) AcceptDST() (*Conn, error) {
 // Close closes the listener.
 // Any blocked Accept operations will be unblocked and return errors.
 func (m *Mux) Close() error {
-	var err error = ErrCloseClosed
+	var err error = ErrClosedMux
 	m.closeOnce.Do(func() {
 		err = m.conn.Close()
 		close(m.incoming)
@@ -142,7 +142,7 @@ func (m *Mux) Dial(network, addr string) (net.Conn, error) {
 //	Dial("dst", "[fe80::1%lo0]:80")
 func (m *Mux) DialDST(network, addr string) (*Conn, error) {
 	if network != "dst" {
-		return nil, ErrNotDSTNetwork
+		return nil, ErrNotDST
 	}
 
 	dst, err := net.ResolveUDPAddr("udp", addr)
@@ -190,7 +190,7 @@ func (m *Mux) clientHandshake(dst net.Addr, connID connectionID, resp chan packe
 		select {
 		case <-m.closed:
 			// Failure. The mux has been closed.
-			return nil, ErrClosed
+			return nil, ErrClosedConn
 
 		case <-handshakeTimeout.C:
 			// Handshake timeout. Close and abort.

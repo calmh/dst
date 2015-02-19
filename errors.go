@@ -15,10 +15,9 @@ func (e Error) Error() string {
 }
 
 var (
-	ErrCloseClosed      = &Error{"close on already closed mux"}
-	ErrAcceptClosed     = &Error{"accept on closed mux"}
-	ErrNotDSTNetwork    = &Error{"network is not dst"}
+	ErrClosedConn       = &Error{"operation on closed connection"}
+	ErrClosedMux        = &Error{"operation on closed mux"}
 	ErrHandshakeTimeout = &Error{"handshake timeout"}
-	ErrClosed           = &Error{"operation on closed connection"}
+	ErrNotDST           = &Error{"network is not dst"}
 	ErrNotImplemented   = &Error{"not implemented"}
 )

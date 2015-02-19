@@ -64,7 +64,7 @@ func (b *sendBuffer) Write(pkt packet) error {
 
 	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
 		if b.closing {
-			return ErrClosed
+			return ErrClosedConn
 		}
 		if debugConnection {
 			log.Println(b, "Write blocked")

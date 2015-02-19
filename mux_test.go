@@ -40,7 +40,7 @@ func TestMuxClose(t *testing.T) {
 	}
 
 	err = mp.Close()
-	if err != dst.ErrCloseClosed {
+	if err != dst.ErrClosedMux {
 		t.Error("Unexpected error", err)
 	}
 }
