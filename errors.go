@@ -20,4 +20,5 @@ var (
 	ErrNotDSTNetwork    = &Error{"network is not dst"}
 	ErrHandshakeTimeout = &Error{"handshake timeout"}
 	ErrClosed           = &Error{"operation on closed connection"}
+	ErrNotImplemented   = &Error{"not implemented"}
 )

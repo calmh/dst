@@ -488,7 +488,7 @@ func (c *Conn) RemoteAddr() net.Addr {
 //
 // BUG(jb): SetDeadline is not implemented.
 func (c *Conn) SetDeadline(t time.Time) error {
-	panic("unimplemented")
+	return ErrNotImplemented
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
@@ -496,7 +496,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 //
 // BUG(jb): SetReadDeadline is not implemented.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	panic("unimplemented")
+	return ErrNotImplemented
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
@@ -506,7 +506,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 //
 // BUG(jb): SetWriteDeadline is not implemented.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	panic("unimplemented")
+	return ErrNotImplemented
 }
 
 type Statistics struct {
