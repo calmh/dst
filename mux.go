@@ -122,7 +122,7 @@ func (m *Mux) Addr() net.Addr {
 //	Dial("dst", "google.com:http")
 //	Dial("dst", "[2001:db8::1]:http")
 //	Dial("dst", "[fe80::1%lo0]:80")
-func (m *Mux) Dial(network, addr string) (*Conn, error) {
+func (m *Mux) Dial(network, addr string) (net.Conn, error) {
 	return m.DialUDT(network, addr)
 }
 
