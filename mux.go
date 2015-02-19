@@ -19,7 +19,7 @@ const (
 	handshakeInterval   = 1 * time.Second
 )
 
-// Mux is a UDP multiplexer of UDT connections.
+// Mux is a UDP multiplexer of DST connections.
 type Mux struct {
 	conn       net.PacketConn
 	packetSize int
@@ -35,7 +35,7 @@ type Mux struct {
 	buffers *sync.Pool
 }
 
-// NewMux creates a new UDT Mux on top of a packet connection.
+// NewMux creates a new DST Mux on top of a packet connection.
 func NewMux(conn net.PacketConn, packetSize int) *Mux {
 	if packetSize <= 0 {
 		packetSize = maxPacketSize
@@ -79,11 +79,11 @@ func NewMux(conn net.PacketConn, packetSize int) *Mux {
 
 // Accept waits for and returns the next connection to the listener.
 func (m *Mux) Accept() (net.Conn, error) {
-	return m.AcceptUDT()
+	return m.AcceptDST()
 }
 
-// AcceptUDT waits for and returns the next connection to the listener.
-func (m *Mux) AcceptUDT() (*Conn, error) {
+// AcceptDST waits for and returns the next connection to the listener.
+func (m *Mux) AcceptDST() (*Conn, error) {
 	conn, ok := <-m.incoming
 	if !ok {
 		return nil, ErrAcceptClosed
@@ -123,7 +123,7 @@ func (m *Mux) Addr() net.Addr {
 //	Dial("dst", "[2001:db8::1]:http")
 //	Dial("dst", "[fe80::1%lo0]:80")
 func (m *Mux) Dial(network, addr string) (net.Conn, error) {
-	return m.DialUDT(network, addr)
+	return m.DialDST(network, addr)
 }
 
 // Dial connects to the address on the named network.
@@ -140,9 +140,9 @@ func (m *Mux) Dial(network, addr string) (net.Conn, error) {
 //	Dial("dst", "google.com:http")
 //	Dial("dst", "[2001:db8::1]:http")
 //	Dial("dst", "[fe80::1%lo0]:80")
-func (m *Mux) DialUDT(network, addr string) (*Conn, error) {
+func (m *Mux) DialDST(network, addr string) (*Conn, error) {
 	if network != "dst" {
-		return nil, ErrNotUDTNetwork
+		return nil, ErrNotDSTNetwork
 	}
 
 	dst, err := net.ResolveUDPAddr("udp", addr)

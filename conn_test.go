@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,36 @@ func TestHandshakeTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Error("Unexpected error string", err.Error())
 	}
+}
+
+func TestManyConnections(t *testing.T) {
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("need GOMAXPROCS > 1")
+	}
+	conn0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux0 := NewMux(conn0, 0)
+	go func() {
+		for {
+			mux0.Accept()
+		}
+	}()
+
+	conn1, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux1 := NewMux(conn1, 0)
+
+	allocs := testing.AllocsPerRun(10000, func() {
+		_, err = mux1.Dial("dst", conn0.LocalAddr().String())
+		if err != nil {
+			t.Error("Unexpected error", err)
+		}
+	})
+	t.Logf("%.0f allocs/run", allocs)
 }
 
 func TestAddrs(t *testing.T) {
@@ -401,7 +432,7 @@ func TestPacketSize(t *testing.T) {
 func testPacketSize(muxA, muxB *Mux, t *testing.T) {
 	errors := make(chan error)
 	go func() {
-		conn, err := muxA.AcceptUDT()
+		conn, err := muxA.AcceptDST()
 		if err != nil {
 			errors <- err
 			return

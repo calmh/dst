@@ -31,10 +31,10 @@ func connPair(aLoss, bLoss float64) (*Conn, *Conn, error) {
 	var otherConn *Conn
 	go func() {
 		defer wg.Done()
-		otherConn, otherErr = mpB.AcceptUDT()
+		otherConn, otherErr = mpB.AcceptDST()
 	}()
 
-	conn, err := mpA.DialUDT("dst", mpB.Addr().String())
+	conn, err := mpA.DialDST("dst", mpB.Addr().String())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,10 +65,10 @@ func limitedConnPair(aRate, bRate int64) (*Conn, *Conn, error) {
 	var otherConn *Conn
 	go func() {
 		defer wg.Done()
-		otherConn, otherErr = mpB.AcceptUDT()
+		otherConn, otherErr = mpB.AcceptDST()
 	}()
 
-	conn, err := mpA.DialUDT("dst", mpB.Addr().String())
+	conn, err := mpA.DialDST("dst", mpB.Addr().String())
 	if err != nil {
 		return nil, nil, err
 	}

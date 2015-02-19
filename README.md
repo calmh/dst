@@ -7,9 +7,9 @@ dst
 
 DST is the Datagram Stream Transfer protocol. In principle it's yet
 another way to provide a reliable stream protocol on top of UDP, similar
-to uTP, RUDP, and UDT.
+to uTP, RUDP, and DST.
 
-In fact, it's mostly based on UDT with some significant differences;
+In fact, it's mostly based on DST with some significant differences;
 
  - The packet format is simplified.
 
