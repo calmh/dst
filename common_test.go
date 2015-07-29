@@ -135,10 +135,7 @@ func newLimitedMux(rate int64) (*Mux, error) {
 	}
 
 	if rate > 0 {
-		mp := NewMux(&LimitedPacketConn{
-			limiter: ratelimit.NewBucketWithRate(float64(rate), rate/4),
-			conn:    conn,
-		}, 0)
+		mp := NewMux(NewLimitedPacketConn(conn, ratelimit.NewBucketWithRate(float64(rate), rate/4)), 0)
 		return mp, nil
 	}
 
@@ -184,6 +181,29 @@ func (c *LossyPacketConn) SetWriteDeadline(t time.Time) error {
 type LimitedPacketConn struct {
 	limiter *ratelimit.Bucket
 	conn    net.PacketConn
+	queue   chan queuedPacket
+}
+
+type queuedPacket struct {
+	data []byte
+	addr net.Addr
+}
+
+func NewLimitedPacketConn(conn net.PacketConn, limiter *ratelimit.Bucket) *LimitedPacketConn {
+	c := &LimitedPacketConn{
+		limiter: limiter,
+		conn:    conn,
+		queue:   make(chan queuedPacket, 1000),
+	}
+	go c.sender()
+	return c
+}
+
+func (c *LimitedPacketConn) sender() {
+	for pkt := range c.queue {
+		c.limiter.Wait(int64(len(pkt.data)))
+		c.conn.WriteTo(pkt.data, pkt.addr)
+	}
 }
 
 func (c *LimitedPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
@@ -191,11 +211,19 @@ func (c *LimitedPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 }
 
 func (c *LimitedPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	if _, ok := c.limiter.TakeMaxDuration(int64(len(b)), 100*time.Millisecond); !ok {
-		// Queue size exceeded, packet dropped
-		return len(b), nil
+	bc := make([]byte, len(b))
+	copy(bc, b)
+	pkt := queuedPacket{
+		data: bc,
+		addr: addr,
 	}
-	return c.conn.WriteTo(b, addr)
+
+	select {
+	case c.queue <- pkt:
+	default:
+	}
+
+	return len(b), nil
 }
 
 func (c *LimitedPacketConn) Close() error {

@@ -12,7 +12,7 @@ type packetList struct {
 // CutLessSeq cuts packets from the start of the list with sequence numbers
 // lower than seq. Returns the number of packets that were cut.
 func (l *packetList) CutLessSeq(seq sequenceNo) int {
-	var i int
+	var i, cut int
 	for i = range l.packets {
 		if i == l.slot {
 			break
@@ -20,11 +20,12 @@ func (l *packetList) CutLessSeq(seq sequenceNo) int {
 		if !l.packets[i].LessSeq(seq) {
 			break
 		}
+		cut++
 	}
-	if i > 0 {
-		l.Cut(i)
+	if cut > 0 {
+		l.Cut(cut)
 	}
-	return i
+	return cut
 }
 
 func (l *packetList) Cut(n int) {

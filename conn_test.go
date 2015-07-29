@@ -319,7 +319,7 @@ func TestTLSOnTopOfLossy(t *testing.T) {
 		InsecureSkipVerify: true,
 	}
 
-	a, b, err := connPair(0.001, 0.001)
+	a, b, err := limitedConnPair(1e6/8, 1e6/8)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,10 @@
 package dst
 
 import (
+	"fmt"
+	"io"
 	"log"
+	"os"
 	"time"
 )
 
@@ -16,49 +19,58 @@ type windowCC struct {
 	minRate       int
 	maxRate       int
 	currentRate   int
+	targetRate    int
 
 	curRTT time.Duration
 	minRTT time.Duration
+
+	statsFile io.WriteCloser
+	start     time.Time
 }
 
 func newWindowCC() *windowCC {
+	var statsFile io.WriteCloser
+
+	if debugCC {
+		statsFile, _ = os.Create(fmt.Sprintf("cc-log-%d.csv", time.Now().Unix()))
+		fmt.Fprintf(statsFile, "ms,minWin,maxWin,curWin,minRate,maxRate,curRate,minRTT,curRTT\n")
+	}
+
 	return &windowCC{
-		minWindow:     2,
-		maxWindow:     4096,
-		currentWindow: 16,
+		minWindow:     1, // Packets
+		maxWindow:     16 << 10,
+		currentWindow: 1,
 
-		minRate:     100,
-		maxRate:     200e3,
+		minRate:     100,  // PPS
+		maxRate:     80e3, // Roughly 1 Gbps at 1500 bytes per packet
 		currentRate: 100,
+		targetRate:  1000,
 
-		minRTT: 10 * time.Second,
+		minRTT:    10 * time.Second,
+		statsFile: statsFile,
+		start:     time.Now(),
 	}
 }
 
 func (w *windowCC) Ack() {
-	changed := false
-
-	if w.curRTT > 100000 {
+	if w.curRTT > w.minRTT+100*time.Millisecond {
 		return
 	}
 
-	if w.currentWindow < w.maxWindow/2 {
-		w.currentWindow = w.currentWindow * 3 / 2
-		changed = true
-	} else if w.currentWindow < w.maxWindow {
-		w.currentWindow += w.minWindow
+	changed := false
+
+	if w.currentWindow < w.maxWindow {
+		w.currentWindow++
 		changed = true
 	}
 
-	if w.currentRate < w.maxRate/2 {
-		w.currentRate = w.currentRate * 3 / 2
-		changed = true
-	} else if w.currentRate < w.maxRate {
-		w.currentRate += w.minRate
+	if w.currentRate != w.targetRate {
+		w.currentRate = (w.currentRate*7 + w.targetRate) / 8
 		changed = true
 	}
 
 	if changed && debugCC {
+		w.log()
 		log.Println("Ack", w.currentWindow, w.currentRate)
 	}
 }
@@ -71,16 +83,15 @@ func (w *windowCC) NegAck() {
 		w.currentRate /= 2
 	}
 	if debugCC {
+		w.log()
 		log.Println("NegAck", w.currentWindow, w.currentRate)
 	}
 }
 
 func (w *windowCC) Exp() {
 	w.currentWindow = w.minWindow
-	if w.currentRate > w.minRate {
-		w.currentRate = w.currentRate / 2
-	}
 	if debugCC {
+		w.log()
 		log.Println("Exp", w.currentWindow, w.currentRate)
 	}
 }
@@ -114,17 +125,21 @@ func (w *windowCC) UpdateRTT(rtt time.Duration) {
 		}
 	}
 
-	if w.curRTT > w.minRTT+100*time.Millisecond {
-		// RTT increased 100ms over minimum
-		w.currentRate = w.currentRate * 7 / 8
-		w.maxRate = w.currentRate * 3 / 2
-		w.minRTT = w.curRTT
-		if debugCC {
-			log.Println("Nailing rate", w.currentRate, w.maxRate)
-		}
+	if w.curRTT > w.minRTT+200*time.Millisecond && w.targetRate > 2*w.minRate {
+		w.targetRate -= w.minRate
+	} else if w.curRTT < w.minRTT+20*time.Millisecond && w.targetRate < w.maxRate {
+		w.targetRate += w.minRate
 	}
 
 	if debugCC {
-		log.Println("RTT", w.curRTT)
+		w.log()
+		log.Println("RTT", w.curRTT, "target rate", w.targetRate, "current rate", w.currentRate, "current window", w.currentWindow)
 	}
+}
+
+func (w *windowCC) log() {
+	if w.statsFile == nil {
+		return
+	}
+	fmt.Fprintf(w.statsFile, "%.02f,%d,%d,%d,%d,%d,%d,%.02f,%.02f\n", time.Since(w.start).Seconds()*1000, w.minWindow, w.maxWindow, w.currentWindow, w.minRate, w.maxRate, w.currentRate, w.minRTT.Seconds()*1000, w.curRTT.Seconds()*1000)
 }

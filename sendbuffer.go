@@ -26,11 +26,11 @@ type sendBuffer struct {
 	sendWindow int // maximum number of outstanding non-acked packets
 	packetRate int // target pps
 
-	buffer   packetList // buffered packets
+	send     packetList // buffered packets
 	sendSlot int        // buffer slot from which to send next packet
 
-	lost         packetList // list of packets reported lost by timeout
-	lostSendSlot int        // next lost packet to resend
+	lost     packetList // list of packets reported lost by timeout
+	lostSlot int        // next lost packet to resend
 
 	closed  bool
 	closing bool
@@ -62,7 +62,7 @@ func (b *sendBuffer) Write(pkt packet) error {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	for b.buffer.Full() || b.buffer.Len() >= b.sendWindow {
+	for b.send.Full() || b.send.Len() >= b.sendWindow {
 		if b.closing {
 			return ErrClosedConn
 		}
@@ -71,7 +71,7 @@ func (b *sendBuffer) Write(pkt packet) error {
 		}
 		b.cond.Wait()
 	}
-	if !b.buffer.Append(pkt) {
+	if !b.send.Append(pkt) {
 		panic("bug: append failed")
 	}
 	b.cond.Broadcast()
@@ -87,11 +87,13 @@ func (b *sendBuffer) Acknowledge(seq sequenceNo) {
 		if debugConnection {
 			log.Println(b, "cut", cut, "from loss list")
 		}
-		b.lostSendSlot = 0
+		// Next resend should always start with the first packet, regardless
+		// of what we might already have resent previously.
+		b.lostSlot = 0
 		b.cond.Broadcast()
 	}
 
-	if cut := b.buffer.CutLessSeq(seq); cut > 0 {
+	if cut := b.send.CutLessSeq(seq); cut > 0 {
 		if debugConnection {
 			log.Println(b, "cut", cut, "from send list")
 		}
@@ -105,7 +107,7 @@ func (b *sendBuffer) Acknowledge(seq sequenceNo) {
 func (b *sendBuffer) NegativeAck(seq sequenceNo) {
 	b.mut.Lock()
 
-	pkts := b.buffer.PopSequence(seq)
+	pkts := b.send.PopSequence(seq)
 	if cut := len(pkts); cut > 0 {
 		b.lost.AppendAll(pkts)
 		if debugConnection {
@@ -113,7 +115,7 @@ func (b *sendBuffer) NegativeAck(seq sequenceNo) {
 			log.Println(seq, pkts)
 		}
 		b.sendSlot -= cut
-		b.lostSendSlot = 0
+		b.lostSlot = 0
 		b.cond.Broadcast()
 	}
 
@@ -121,50 +123,47 @@ func (b *sendBuffer) NegativeAck(seq sequenceNo) {
 }
 
 // ScheduleResend arranges for a resend of all currently unacknowledged
-// packets, up to the current window size. Returns true if at least one packet
-// was scheduled for resend, otherwise false.
-func (b *sendBuffer) ScheduleResend() (resent bool) {
+// packets.
+func (b *sendBuffer) ScheduleResend() {
 	b.mut.Lock()
 
 	if b.sendSlot > 0 {
 		// There are packets that have been sent but not acked. Move them from
 		// the send buffer to the loss list for retransmission.
-		resent = true
 		if debugConnection {
-			log.Println(b, "scheduled resend from buffer", b.sendSlot)
+			log.Println(b, "scheduled resend from send list", b.sendSlot)
 		}
 
 		// Append the packets to the loss list and rewind the send buffer
-		b.lost.AppendAll(b.buffer.All()[:b.sendSlot])
-		b.buffer.Cut(b.sendSlot)
+		b.lost.AppendAll(b.send.All()[:b.sendSlot])
+		b.send.Cut(b.sendSlot)
 		b.sendSlot = 0
+		b.cond.Broadcast()
 	}
 
-	if b.lostSendSlot > 0 {
+	if b.lostSlot > 0 {
 		// Also resend whatever was already in the loss list
-		resent = true
 		if debugConnection {
-			log.Println(b, "resend from loss list", b.lostSendSlot)
+			log.Println(b, "scheduled resend from loss list", b.lostSlot)
 		}
-		b.lostSendSlot = 0
-	}
-
-	if resent {
+		b.lostSlot = 0
 		b.cond.Broadcast()
 	}
 
 	b.mut.Unlock()
-	return
 }
 
 // SetWindowAndRate sets the window size (in packets) and packet rate (in
 // packets per second) to use when sending.
 func (b *sendBuffer) SetWindowAndRate(sendWindow, packetRate int) {
 	b.mut.Lock()
+	if debugConnection {
+		log.Println(b, "new window & rate", sendWindow, packetRate)
+	}
 	b.packetRate = packetRate
 	b.sendWindow = sendWindow
-	if b.sendWindow > b.buffer.Cap() {
-		b.buffer.Resize(b.sendWindow)
+	if b.sendWindow > b.send.Cap() {
+		b.send.Resize(b.sendWindow)
 		b.cond.Broadcast()
 	}
 	b.mut.Unlock()
@@ -180,7 +179,7 @@ func (b *sendBuffer) Stop() {
 	}
 
 	b.closing = true
-	for b.lost.Len() > 0 || b.buffer.Len() > 0 {
+	for b.lost.Len() > 0 || b.send.Len() > 0 {
 		b.cond.Wait()
 	}
 
@@ -218,34 +217,34 @@ func (b *sendBuffer) writerLoop() {
 	for {
 		var pkt packet
 		b.mut.Lock()
-		for b.lostSendSlot >= b.sendWindow ||
-			(b.sendSlot == b.buffer.Len() && b.lostSendSlot == b.lost.Len()) {
+		for b.lostSlot >= b.sendWindow ||
+			(b.sendSlot == b.send.Len() && b.lostSlot == b.lost.Len()) {
 			if b.closed {
 				b.mut.Unlock()
 				return
 			}
 
 			if debugConnection {
-				log.Println(b, "writer() paused", b.lostSendSlot, b.sendSlot, b.sendWindow, b.lost.Len())
+				log.Println(b, "writer() paused", b.lostSlot, b.sendSlot, b.sendWindow, b.lost.Len())
 			}
 			b.cond.Wait()
 		}
 
-		if b.lostSendSlot < b.lost.Len() {
-			pkt = b.lost.All()[b.lostSendSlot]
+		if b.lostSlot < b.lost.Len() {
+			pkt = b.lost.All()[b.lostSlot]
 			pkt.hdr.timestamp = timestampMicros()
-			b.lostSendSlot++
+			b.lostSlot++
 
 			if debugConnection {
-				log.Println(b, "resend", pkt.hdr.connID, pkt.hdr.sequenceNo)
+				log.Println(b, "resend", b.lostSlot, b.lost.Len(), b.sendWindow, pkt.hdr.connID, pkt.hdr.sequenceNo)
 			}
-		} else if b.sendSlot < b.buffer.Len() {
-			pkt = b.buffer.All()[b.sendSlot]
+		} else if b.sendSlot < b.send.Len() {
+			pkt = b.send.All()[b.sendSlot]
 			pkt.hdr.timestamp = timestampMicros()
 			b.sendSlot++
 
 			if debugConnection {
-				log.Println(b, "send", pkt.hdr.connID, pkt.hdr.sequenceNo)
+				log.Println(b, "send", b.sendSlot, b.send.Len(), b.sendWindow, pkt.hdr.connID, pkt.hdr.sequenceNo)
 			}
 		}
 

@@ -61,12 +61,18 @@ func NewMux(conn net.PacketConn, packetSize int) *Mux {
 		for buf := 16384 * 1024; buf >= 512*1024; buf -= 512 * 1024 {
 			err := conn.SetReadBuffer(buf)
 			if err == nil {
+				if debugMux {
+					log.Println(m, "read buffer is", buf)
+				}
 				break
 			}
 		}
 		for buf := 16384 * 1024; buf >= 512*1024; buf -= 512 * 1024 {
 			err := conn.SetWriteBuffer(buf)
 			if err == nil {
+				if debugMux {
+					log.Println(m, "write buffer is", buf)
+				}
 				break
 			}
 		}
@@ -266,26 +272,9 @@ func (m *Mux) readerLoop() {
 			log.Println(m, "read", pkt)
 		}
 
-		switch hdr.packetType {
-		case typeData:
-			m.connsMut.Lock()
-			conn, ok := m.conns[hdr.connID]
-			m.connsMut.Unlock()
-
-			if ok {
-				conn.in <- packet{
-					dst:  nil,
-					hdr:  hdr,
-					data: bufCopy,
-				}
-			} else if debugMux {
-				log.Printf("Data packet for unknown conn %v", hdr.connID)
-			}
-
-		case typeHandshake:
+		if hdr.packetType == typeHandshake {
 			m.incomingHandshake(from, hdr, bufCopy)
-
-		default:
+		} else {
 			m.connsMut.Lock()
 			conn, ok := m.conns[hdr.connID]
 			m.connsMut.Unlock()
@@ -297,95 +286,101 @@ func (m *Mux) readerLoop() {
 					data: bufCopy,
 				}
 			} else if debugMux && hdr.packetType != typeShutdown {
-				log.Printf("Control packet %v for unknown conn %v", hdr, hdr.connID)
+				log.Printf("packet %v for unknown conn %v", hdr, hdr.connID)
 			}
 		}
 	}
 }
 
 func (m *Mux) incomingHandshake(from net.Addr, hdr header, data []byte) {
-	switch hdr.connID {
-	case 0:
+	if hdr.connID == 0 {
 		// A new incoming handshake request.
+		m.incomingHandshakeRequest(from, hdr, data)
+	} else {
+		// A response to an ongoing handshake.
+		m.incomingHandshakeResponse(from, hdr, data)
+	}
+}
 
-		if hdr.flags&flagRequest != flagRequest {
-			log.Printf("Handshake pattern with flags 0x%x to connID zero", hdr.flags)
-			return
-		}
+func (m *Mux) incomingHandshakeRequest(from net.Addr, hdr header, data []byte) {
+	if hdr.flags&flagRequest != flagRequest {
+		log.Printf("Handshake pattern with flags 0x%x to connID zero", hdr.flags)
+		return
+	}
 
-		hd := unmarshalHandshakeData(data)
+	hd := unmarshalHandshakeData(data)
 
-		correctCookie := cookie(from)
-		if hd.cookie != correctCookie {
-			// Incorrect or missing SYN cookie. Send back a handshake
-			// with the expected one.
-			m.write(packet{
-				dst: from,
-				hdr: header{
-					packetType: typeHandshake,
-					flags:      flagResponse | flagCookie,
-					connID:     hd.connID,
-					timestamp:  timestampMicros(),
-				},
-				data: handshakeData{
-					packetSize: uint32(m.packetSize),
-					cookie:     correctCookie,
-				}.marshal(),
-			})
-			return
-		}
-
-		seqNo := randomSeqNo()
-
-		m.connsMut.Lock()
-		connID := m.newConnID()
-
-		conn := newConn(m, from)
-		conn.connID = connID
-		conn.remoteConnID = hd.connID
-		conn.nextSeqNo = seqNo + 1
-		conn.nextRecvSeqNo = hdr.sequenceNo + 1
-		conn.packetSize = int(hd.packetSize)
-		if conn.packetSize > m.packetSize {
-			conn.packetSize = m.packetSize
-		}
-		conn.start()
-
-		m.conns[connID] = conn
-		m.connsMut.Unlock()
-
+	correctCookie := cookie(from)
+	if hd.cookie != correctCookie {
+		// Incorrect or missing SYN cookie. Send back a handshake
+		// with the expected one.
 		m.write(packet{
 			dst: from,
 			hdr: header{
 				packetType: typeHandshake,
-				flags:      flagResponse,
+				flags:      flagResponse | flagCookie,
 				connID:     hd.connID,
-				sequenceNo: seqNo,
 				timestamp:  timestampMicros(),
 			},
 			data: handshakeData{
-				connID:     conn.connID,
-				packetSize: uint32(conn.packetSize),
+				packetSize: uint32(m.packetSize),
+				cookie:     correctCookie,
 			}.marshal(),
 		})
+		return
+	}
 
-		m.incoming <- conn
+	seqNo := randomSeqNo()
 
-	default:
-		m.connsMut.Lock()
-		handShake, ok := m.handshakes[hdr.connID]
-		m.connsMut.Unlock()
+	m.connsMut.Lock()
+	connID := m.newConnID()
 
-		if ok {
-			// This is a response to a handshake in progress.
-			handShake <- packet{
-				dst:  nil,
-				hdr:  hdr,
-				data: data,
-			}
-		} else if debugMux && hdr.packetType != typeShutdown {
-			log.Printf("Handshake packet %v for unknown conn %v", hdr, hdr.connID)
+	conn := newConn(m, from)
+	conn.connID = connID
+	conn.remoteConnID = hd.connID
+	conn.nextSeqNo = seqNo + 1
+	conn.nextRecvSeqNo = hdr.sequenceNo + 1
+	conn.packetSize = int(hd.packetSize)
+	if conn.packetSize > m.packetSize {
+		conn.packetSize = m.packetSize
+	}
+	conn.start()
+
+	m.conns[connID] = conn
+	m.connsMut.Unlock()
+
+	m.write(packet{
+		dst: from,
+		hdr: header{
+			packetType: typeHandshake,
+			flags:      flagResponse,
+			connID:     hd.connID,
+			sequenceNo: seqNo,
+			timestamp:  timestampMicros(),
+		},
+		data: handshakeData{
+			connID:     conn.connID,
+			packetSize: uint32(conn.packetSize),
+		}.marshal(),
+	})
+
+	m.incoming <- conn
+}
+
+func (m *Mux) incomingHandshakeResponse(from net.Addr, hdr header, data []byte) {
+	m.connsMut.Lock()
+	handShake, ok := m.handshakes[hdr.connID]
+	m.connsMut.Unlock()
+
+	if ok {
+		// This is a response to a handshake in progress.
+		handShake <- packet{
+			dst:  nil,
+			hdr:  hdr,
+			data: data,
 		}
+	} else if debugMux && hdr.packetType != typeShutdown {
+		log.Printf("Handshake packet %v for unknown conn %v", hdr, hdr.connID)
 	}
 }
 

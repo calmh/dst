@@ -13,22 +13,20 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/calmh/dst"
+	"github.com/anacrolix/utp"
 )
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU() + 4)
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	flag.Parse()
 
-	sock, err := net.ListenUDP("udp", &net.UDPAddr{})
+	sock, err := utp.NewSocket(":0")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	mux := dst.NewMux(sock, 0)
-
 	if flag.NArg() > 0 {
-		conn, err := mux.Dial("dst", flag.Arg(0))
+		conn, err := sock.Dial(flag.Arg(0))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -36,9 +34,9 @@ func main() {
 		test(conn)
 		return
 	} else {
-		log.Println("Accpting connections on", mux.Addr())
+		log.Println("Accpting connections on", sock.Addr())
 		for {
-			conn, err := mux.Accept()
+			conn, err := sock.Accept()
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -56,7 +54,7 @@ func test(conn net.Conn) {
 
 	readFrom(conn)
 
-	log.Println(conn, conn.(*dst.Conn).GetStatistics())
+	//log.Println(conn, conn.(*dst.Conn).GetStatistics())
 }
 
 func readFrom(conn net.Conn) {

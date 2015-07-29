@@ -6,6 +6,8 @@ package dst
 
 import (
 	"bytes"
+	crand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -20,16 +22,24 @@ const (
 	defExpTime       = 100 * time.Millisecond // N * (4 * RTT + RTTVar + SYN)
 	expCountClose    = 16                     // close connection after this many Exps
 	minTimeClose     = 15 * time.Second       // if at least this long has passed
-	maxInputBuffer   = 8192 * 1024            // bytes
-	muxBufferPackets = 1024                   // buffer size of channel between mux and reader routine
+	maxInputBuffer   = 8 << 20                // bytes
+	muxBufferPackets = 128                    // buffer size of channel between mux and reader routine
 	rttMeasureWindow = 32                     // number of packets to track for RTT averaging
+	rttMeasureSample = 128                    // Sample every ... packet for RTT
 
-	// number of bytes to subtract from MTU when chunking data, to avoid fragmentation
+	// number of bytes to subtract from MTU when chunking data, to try to
+	// avoid fragmentation
 	sliceOverhead = 8 /*pppoe, similar*/ + 20 /*ipv4*/ + 8 /*udp*/ + 16 /*dst*/
 )
 
 func init() {
-	rand.Seed(time.Now().UnixNano())
+	// Properly seed the random number generator that we use for sequence
+	// numbers and stuff.
+	buf := make([]byte, 8)
+	if n, err := crand.Read(buf); n != 8 || err != nil {
+		panic("init random failure")
+	}
+	rand.Seed(int64(binary.BigEndian.Uint64(buf)))
 }
 
 // TODO: export this interface when it's usable from the outside
@@ -68,8 +78,11 @@ type Conn struct {
 	expMut sync.Mutex
 	exp    *time.Timer
 
-	sendBuffer  *sendBuffer // goroutine safe
-	sentPackets *timeBuffer // goroutine safe
+	sendBuffer *sendBuffer // goroutine safe
+
+	packetDelays     [rttMeasureWindow]time.Duration
+	packetDelaysSlot int
+	packetDelaysMut  sync.Mutex
 
 	// Owned by the reader routine, needs no locking
 
@@ -103,13 +116,13 @@ func newConn(m *Mux, dst net.Addr) *Conn {
 		packetSize:          maxPacketSize,
 		in:                  make(chan packet, muxBufferPackets),
 		closed:              make(chan struct{}),
-		sentPackets:         newTimeBuffer(rttMeasureWindow),
 		sendBuffer:          newSendBuffer(m),
 		exp:                 time.NewTimer(defExpTime),
 		debugResetRecvSeqNo: make(chan sequenceNo),
 		expReset:            time.Now(),
 	}
 
+	conn.lastAckedSeqNo = conn.nextSeqNo - 1
 	conn.inbufCond = sync.NewCond(&conn.inbufMut)
 
 	conn.cc = newWindowCC()
@@ -133,7 +146,7 @@ func (c *Conn) reader() {
 		select {
 		case <-c.closed:
 			// Ack any received but not yet acked messages.
-			c.sendAck()
+			c.sendAck(0)
 
 			// Send a shutdown message.
 			c.nextSeqNoMut.Lock()
@@ -178,7 +191,7 @@ func (c *Conn) reader() {
 
 		case n := <-c.debugResetRecvSeqNo:
 			// Back door for testing
-			c.lastAckedSeqNo = n + 1
+			c.lastAckedSeqNo = n - 1
 			c.nextRecvSeqNo = n
 		}
 	}
@@ -187,14 +200,14 @@ func (c *Conn) reader() {
 func (c *Conn) eventExp() {
 	c.expCount++
 
-	resent := c.sendBuffer.ScheduleResend()
-	if resent {
+	if c.sendBuffer.lost.Len() > 0 || c.sendBuffer.send.Len() > 0 {
+		c.cc.Exp()
+		c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
+		c.sendBuffer.ScheduleResend()
+
 		if debugConnection {
 			log.Println(c, "did resends due to Exp")
 		}
-
-		c.cc.Exp()
-		c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
 
 		if c.expCount > expCountClose && time.Since(c.expReset) > minTimeClose {
 			if debugConnection {
@@ -218,17 +231,46 @@ func (c *Conn) rcvAck(pkt packet) {
 		log.Printf("%v read Ack %v", c, ack)
 	}
 
-	c.sentPackets.Recv(ack)
-	c.sendBuffer.Acknowledge(ack)
-
 	c.cc.Ack()
-	rtt, n := c.sentPackets.Average()
-	if n > 8 {
-		c.cc.UpdateRTT(rtt)
+
+	if ack%rttMeasureSample == 0 {
+		if ts := timestamp(binary.BigEndian.Uint32(pkt.data)); ts > 0 {
+			if delay := time.Duration(timestampMicros()-ts) * time.Microsecond; delay > 0 {
+				c.packetDelaysMut.Lock()
+				c.packetDelays[c.packetDelaysSlot] = delay
+				c.packetDelaysSlot = (c.packetDelaysSlot + 1) % len(c.packetDelays)
+				c.packetDelaysMut.Unlock()
+
+				if rtt, n := c.averageDelay(); n > 8 {
+					c.cc.UpdateRTT(rtt)
+				}
+			}
+		}
 	}
 
+	c.sendBuffer.Acknowledge(ack)
 	c.sendBuffer.SetWindowAndRate(c.cc.SendWindow(), c.cc.PacketRate())
+
 	c.resetExp()
+}
+
+func (c *Conn) averageDelay() (time.Duration, int) {
+	var total time.Duration
+	var n int
+
+	c.packetDelaysMut.Lock()
+	for _, d := range c.packetDelays {
+		if d != 0 {
+			total += d
+			n++
+		}
+	}
+	c.packetDelaysMut.Unlock()
+
+	if n == 0 {
+		return 0, 0
+	}
+	return total / time.Duration(n), n
 }
 
 func (c *Conn) rcvNegAck(pkt packet) {
@@ -258,6 +300,10 @@ func (c *Conn) rcvShutdown(pkt packet) {
 }
 
 func (c *Conn) rcvData(pkt packet) {
+	if debugConnection {
+		log.Println(c, "recv data", pkt.hdr)
+	}
+
 	if pkt.LessSeq(c.nextRecvSeqNo) {
 		if debugConnection {
 			log.Printf("%v old packet received; seq %v, expected %v", c, pkt.hdr.sequenceNo, c.nextRecvSeqNo)
@@ -280,7 +326,7 @@ func (c *Conn) rcvData(pkt packet) {
 
 			c.nextRecvSeqNo = pkt.hdr.sequenceNo + 1
 
-			c.sendAck()
+			c.sendAck(pkt.hdr.timestamp)
 
 			c.inbufMut.Lock()
 			for c.inbuf.Len() > len(pkt.data)+maxInputBuffer {
@@ -306,11 +352,13 @@ func (c *Conn) rcvData(pkt packet) {
 	}
 }
 
-func (c *Conn) sendAck() {
+func (c *Conn) sendAck(ts timestamp) {
 	if c.lastAckedSeqNo == c.nextRecvSeqNo {
 		return
 	}
 
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(ts))
 	c.mux.write(packet{
 		src: c.connID,
 		dst: c.dst,
@@ -319,6 +367,7 @@ func (c *Conn) sendAck() {
 			connID:     c.remoteConnID,
 			sequenceNo: c.nextRecvSeqNo,
 		},
+		data: buf[:],
 	})
 
 	atomic.AddInt64(&c.packetsOut, 1)
@@ -355,7 +404,7 @@ func (c *Conn) sendNegAck() {
 }
 
 func (c *Conn) resetExp() {
-	d, _ := c.sentPackets.Average()
+	d, _ := c.averageDelay()
 	d = d*4 + 10*time.Millisecond
 
 	if d < defExpTime {
@@ -427,8 +476,6 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		if err := c.sendBuffer.Write(pkt); err != nil {
 			return sent, err
 		}
-
-		c.sentPackets.Sent(pkt.hdr.sequenceNo)
 
 		atomic.AddInt64(&c.packetsOut, 1)
 		atomic.AddInt64(&c.bytesOut, int64(len(slice)+dstHeaderLen))
